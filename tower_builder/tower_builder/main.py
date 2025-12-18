@@ -5,11 +5,7 @@
 - execute_stacking_sequence 함수 내 'wait' 임포트 추가
 """
 
-import os
 import cv2
-import time
-import threading
-import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
@@ -23,7 +19,7 @@ from tower_builder.gripper_drl_controller import GripperController
 from tower_builder.camera import BlockDetectionSystem
 
 # ============================================================
-# ⚙️ 설정
+# ⚙️ [설정]
 # ============================================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "e0509"
@@ -37,7 +33,6 @@ class RobotControllerNode(Node):
     def __init__(self):
         super().__init__("robot_controller_node")
         
-        # 비전 시스템 초기화
         self.vision = BlockDetectionSystem()
         if not self.vision.start():
             raise RuntimeError("Vision start failed")
@@ -52,7 +47,7 @@ class RobotControllerNode(Node):
         self.gripper = None
         try:
             self.gripper = GripperController(node=self, namespace=ROBOT_ID)
-            time.sleep(1)
+            time.sleep(1.0)
             if self.gripper.initialize():
                 self.get_logger().info("✅ 그리퍼 연결 성공")
                 # 초기화: 0 = Open (지나님 피셜)
@@ -61,15 +56,11 @@ class RobotControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f"그리퍼 오류: {e}")
 
-    # ---------------------------
-    # 카메라/그리퍼 종료
-    # ---------------------------
     def stop_camera(self):
         self.vision.stop()
 
     def terminate_gripper(self):
-        if self.gripper: 
-            self.gripper.terminate()
+        if self.gripper: self.gripper.terminate()
 
     # ============================================================
     # [핵심] 좌표 변환 (강사님 공식 + 지나님 Z값 825)
@@ -90,9 +81,9 @@ class RobotControllerNode(Node):
             
         return final_x, final_y, final_z
 
-    # ---------------------------
-    # 마우스 클릭 이벤트
-    # ---------------------------
+    # ============================================================
+    # 마우스 콜백
+    # ============================================================
     def mouse_callback(self, event, x, y, flags, param):
         if event != cv2.EVENT_LBUTTONDOWN: return
         if self.is_working:
@@ -102,11 +93,16 @@ class RobotControllerNode(Node):
         # 1. 블럭 선택
         if len(self.selected_queue) < self.target_stack_count:
             block = self.vision.find_block_at(x, y, update=False)
-            if block and block not in self.selected_queue:
+            if block:
+                if block in self.selected_queue: return
                 self.selected_queue.append(block)
                 block.selection_order = len(self.selected_queue)
+                
                 w = min(block.real_width_mm, block.real_height_mm)
                 print(f"✅ 블럭 선택 [{len(self.selected_queue)}/{self.target_stack_count}] (크기: {w:.1f}mm)")
+                
+                if len(self.selected_queue) == self.target_stack_count:
+                    print("\n🎯 블럭 선택 완료! [탑을 쌓을 바닥]을 클릭하세요.")
 
         # 2. 위치 지정 및 실행
         elif self.stack_base_coords is None:
@@ -147,12 +143,6 @@ class RobotControllerNode(Node):
         # T_MOVE = 3.5
         # T_SHORT = 1.5
         # T_GRIP = 1.0
-
-        self.is_working = True
-        print("\n🚀 로봇 작업 시퀀스 시작")
-
-        BASE_Z, BLOCK_H = 152.0, 40.0
-        stack_x, stack_y = self.stack_base_coords
 
         try:
             # 1. 홈 정렬
@@ -271,27 +261,12 @@ class RobotControllerNode(Node):
         except Exception as e:
             self.get_logger().error(f"작업 중 오류 발생: {e}")
         finally:
-            self.selected_queue.clear()
+            self.selected_queue = []
             self.stack_base_coords = None
             self.is_working = False
             self.target_stack_count = 0 
             print("🎉 완료! 다시 시작하려면 터미널을 확인하세요.")
 
-        # [이동 5] 적재 위치로 하강
-        # 블록을 놓을 때는 살짝 위(place_z + 10mm)까지만 빠르게 가고, 마지막은 천천히
-        movel(posx([place_x, place_y, place_z + 10, rx, ry, place_rz]), vel=VELOCITY/2, acc=ACC/2)
-        
-        # 그리퍼 열기 (놓기)
-        if self.gripper: self.gripper.move(0) # 완전히 열기
-        print("   🖐 놓기 완료")
-        wait(0.5)
-
-        # [이동 6] 적재 후 상승
-        movel(posx([place_x, place_y, safe_z, rx, ry, place_rz]), vel=VELOCITY, acc=ACC)
-
-    # ---------------------------
-    # 비전 프레임 처리 및 렌더링
-    # ---------------------------
     def process_and_render(self):
         if not self.vision.update(): return
 
@@ -299,7 +274,8 @@ class RobotControllerNode(Node):
         display = self.vision.last_frame.copy()
         
         for block in self.blocks:
-            col = (0, 255, 255) if block in self.selected_queue else (0, 255, 0)
+            is_sel = (block in self.selected_queue)
+            col = (0, 255, 255) if is_sel else (0, 255, 0)
             cv2.drawContours(display, [block.rotated_box], 0, col, 2)
             
             if hasattr(block, 'selection_order'):
@@ -316,14 +292,11 @@ class RobotControllerNode(Node):
         cv2.imshow("Result", display)
         cv2.waitKey(1)
 
-# ============================================================
-# 메인 루프
-# ============================================================
 def main(args=None):
     rclpy.init(args=args)
     dsr_node = rclpy.create_node("dsr_node", namespace=ROBOT_ID)
     DR_init.__dsr__node = dsr_node
-
+    
     try:
         from DSR_ROBOT2 import set_robot_mode, ROBOT_MODE_AUTONOMOUS
         set_robot_mode(ROBOT_MODE_AUTONOMOUS)
@@ -370,7 +343,6 @@ def main(args=None):
         robot.destroy_node()
         dsr_node.destroy_node()
         rclpy.shutdown()
-
 
 if __name__ == "__main__":
     main()
