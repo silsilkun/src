@@ -24,8 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'stb = tower_builder.main:main',
-        'tower = tower_builder.junpyo:main'
+        'stb = tower_builder.main_mod2:main'
         ],
     },
 )

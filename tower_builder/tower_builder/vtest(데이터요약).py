@@ -1,3 +1,4 @@
+#딕셔너리
 import v9
 import threading
 import time
@@ -37,3 +38,5 @@ v9.stop_system()
 #    - 'c' 키: 저장 리스트 초기화
 #    - ESC: 종료
 #    딕셔너리 형태로 좌표 각도 변을 받아올 수 있다
+#import v9
+#v9.start_system()
