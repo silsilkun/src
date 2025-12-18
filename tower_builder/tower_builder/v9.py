@@ -2,12 +2,154 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Literal
 from contextlib import contextmanager
+import json
 from datetime import datetime
 
 # ===== Global System Handle =====
 _system = None
+
+# ===== 1. 깊이 샘플링 설정 =====
+
+@dataclass
+class DepthSamplingConfig:
+    """깊이 유효성 및 샘플링 설정"""
+    
+    # 유효한 깊이 범위 (미터)
+    min_valid_depth: float = 0.05   # 5cm - 카메라 최소 감지 거리
+    max_valid_depth: float = 3.0    # 3m - 카메라 최대 감지 거리
+    
+    # 샘플링할 때의 범위
+    sampling_min_depth: float = 0.05
+    sampling_max_depth: float = 3.0
+    
+    # 샘플링 활성화
+    enable_sampling: bool = True
+    
+    # 샘플링 거리 (픽셀)
+    sampling_distances: List[int] = field(default_factory=lambda: [5, 10, 15])
+    
+    # 샘플링 방향 (4-way 또는 8-way)
+    sampling_directions: Literal[4, 8] = 4  # 4-way: 상하좌우, 8-way: 대각선 포함
+    
+    # 샘플링 방법 (중앙값 또는 평균)
+    sampling_method: Literal['median', 'mean'] = 'median'
+    
+    def get_sampling_offsets(self) -> List[Tuple[int, int]]:
+        """설정에 따라 샘플링 오프셋 생성"""
+        offsets = []
+        for dist in self.sampling_distances:
+            # 상하좌우
+            offsets.extend([
+                (-dist, 0), (dist, 0),
+                (0, -dist), (0, dist),
+            ])
+            # 대각선 (8-way일 때만)
+            if self.sampling_directions == 8:
+                offsets.extend([
+                    (-dist, -dist), (dist, -dist),
+                    (-dist, dist), (dist, dist),
+                ])
+        return offsets
+
+
+# ===== 2. 이미지 처리 설정 =====
+
+@dataclass
+class ImageProcessingConfig:
+    """이미지 처리 파라미터"""
+    
+    # Gaussian Blur 커널 크기 (홀수만 가능)
+    blur_kernel_size: int = 5  # 5x5 커널
+    
+    # 모폴로지 연산 커널 크기 (홀수만 가능)
+    morph_kernel_size: int = 3  # 3x3 커널
+    
+    # Contour 근사 (곡선을 얼마나 단순화할지, 0-1)
+    contour_approx_epsilon: float = 0.04  # 호의 길이의 4%
+    
+    # 꼭지점 개수 범위
+    min_vertices: int = 3   # 삼각형 이상
+    max_vertices: int = 8   # 8각형 이하
+
+
+# ===== 3. 카메라 초기화 설정 =====
+
+@dataclass
+class CameraWarmupConfig:
+    """카메라 초기화 설정"""
+    warmup_frames: int = 30  # 30프레임 @ 30FPS = 1초
+
+
+# ===== 4. 컨투어 필터 설정 =====
+
+@dataclass
+class ContourFilterConfig:
+    """컨투어 필터링 기준"""
+    
+    # 면적 필터 (픽셀²)
+    min_area: int = 90      # 너무 작은 블록 제외
+    max_area: int = 4000    # 너무 큰 객체 제외
+    
+    # 종횡비 필터
+    min_aspect_ratio: float = 0.5
+    max_aspect_ratio: float = 3.0
+    
+    # Solidity 필터
+    min_solidity: float = 0.7
+
+
+# ===== 5. 깊이 필터 설정 =====
+
+@dataclass
+class DepthFilterConfig:
+    """3D 깊이 기반 필터"""
+    
+    min_depth: float = 0.1   # 10cm 이상
+    max_depth: float = 2.0   # 2m 이하
+
+
+# ===== 6. ROI 설정 =====
+
+@dataclass
+class ROIConfig:
+    """관심 영역(Region of Interest) 설정"""
+    
+    x: int = 190      # 좌상단 X 좌표
+    y: int = 140      # 좌상단 Y 좌표
+    width: int = 230  # 가로
+    height: int = 180 # 세로
+
+
+# ===== 7. 캐시 설정 =====
+
+@dataclass
+class CacheConfig:
+    """메모리 캐시 관리 설정"""
+    
+    max_cached_frames: int = 1      # 최신 1개만 유지
+    max_clicked_blocks: int = 0     # 0 = 무제한
+    max_clicked_floor_points: int = 0
+
+
+# ===== 8. 통합 Detector 설정 =====
+
+@dataclass
+class DetectorConfig:
+    """블록 감지기 전체 설정"""
+    
+    # 이진화 임계값 (0-255)
+    threshold: int = 200
+    
+    # 각 서브 설정
+    roi: ROIConfig = field(default_factory=ROIConfig)
+    contour_filter: ContourFilterConfig = field(default_factory=ContourFilterConfig)
+    depth_filter: DepthFilterConfig = field(default_factory=DepthFilterConfig)
+    image_processing: ImageProcessingConfig = field(default_factory=ImageProcessingConfig)
+    depth_sampling: DepthSamplingConfig = field(default_factory=DepthSamplingConfig)
+    cache: CacheConfig = field(default_factory=CacheConfig)
+
 
 # 데이터 클래스
 
@@ -69,19 +211,11 @@ class Block:
         """유효한 깊이 정보가 있는지"""
         return self.depth > 0
         
-        
-        
     def copy_with_click_order(self, order: int) -> "Block":
-        """
-        클릭 순서를 포함한 안전한 Block 복사
-        (GUI / 프레임 변경과 분리됨)
-        """
+        """클릭 순서를 포함한 안전한 Block 복사"""
         data = asdict(self)
-
-        # numpy array는 asdict로 deepcopy 안 되므로 그대로 유지
         data["contour"] = self.contour
         data["rotated_box"] = self.rotated_box
-
         data["click_order"] = order
         return Block(**data)
     
@@ -124,9 +258,9 @@ class Block:
 class FloorPoint:
     """바닥(빈 공간) 클릭 정보를 저장"""
 
-    pixel: Tuple[int, int]                      # (x, y)
-    depth: float                                # meters
-    point_3d: Optional[Tuple[float, float, float]]  # (X, Y, Z) meters
+    pixel: Tuple[int, int]
+    depth: float
+    point_3d: Optional[Tuple[float, float, float]]
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
     @property
@@ -153,8 +287,6 @@ class RealSenseCamera:
         self._depth_scale: float = 0.001
         self._is_running: bool = False
     
-    # -------------------- 속성 --------------------
-    
     @property
     def is_running(self) -> bool:
         return self._is_running
@@ -167,9 +299,7 @@ class RealSenseCamera:
     def depth_scale(self) -> float:
         return self._depth_scale
     
-    # -------------------- 생명주기 --------------------
-    
-    def start(self) -> bool:
+    def start(self, warmup_config: CameraWarmupConfig) -> bool:
         """카메라 시작"""
         if self._is_running:
             return True
@@ -195,7 +325,7 @@ class RealSenseCamera:
             
             # 워밍업
             print("📷 카메라 초기화 중...")
-            for _ in range(30):
+            for _ in range(warmup_config.warmup_frames):
                 self._pipeline.wait_for_frames()
             
             self._is_running = True
@@ -214,15 +344,8 @@ class RealSenseCamera:
             self._is_running = False
             print("📷 카메라 정지")
     
-    # -------------------- 프레임 획득 --------------------
-    
     def get_frames(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        정렬된 컬러/뎁스 프레임 반환
-        
-        Returns:
-            (color_image, depth_image) 또는 (None, None)
-        """
+        """정렬된 컬러/뎁스 프레임 반환"""
         if not self._is_running:
             return None, None
             
@@ -244,18 +367,9 @@ class RealSenseCamera:
         except Exception:
             return None, None
     
-    # -------------------- 깊이 측정 --------------------
-    
     def get_depth_at(self, x: int, y: int, depth_image: np.ndarray, 
-                     use_sampling: bool = True) -> float:
-        """
-        특정 픽셀의 깊이값 반환 (미터)
-        
-        Args:
-            x, y: 픽셀 좌표
-            depth_image: 깊이 이미지 (uint16)
-            use_sampling: 중심값이 0일 때 주변 샘플링 사용 여부
-        """
+                     config: DepthSamplingConfig) -> float:
+        """특정 픽셀의 깊이값 반환 (미터)"""
         x, y = int(x), int(y)
         
         if not (0 <= x < self.width and 0 <= y < self.height):
@@ -265,19 +379,14 @@ class RealSenseCamera:
         raw_depth = depth_image[y, x]
         depth_m = raw_depth * self._depth_scale
         
-        if depth_m > 0.05:  # 5cm 이상이면 유효
+        if depth_m > config.min_valid_depth:
             return depth_m
         
-        if not use_sampling:
+        if not config.enable_sampling:
             return 0.0
         
         # 주변 샘플링
-        offsets = [
-            (-5, 0), (5, 0), (0, -5), (0, 5),
-            (-10, 0), (10, 0), (0, -10), (0, 10),
-            (-5, -5), (5, -5), (-5, 5), (5, 5),
-            (-15, 0), (15, 0), (0, -15), (0, 15),
-        ]
+        offsets = config.get_sampling_offsets()
         
         valid_depths = []
         for dx, dy in offsets:
@@ -285,19 +394,22 @@ class RealSenseCamera:
             if 0 <= sx < self.width and 0 <= sy < self.height:
                 raw = depth_image[sy, sx]
                 d = raw * self._depth_scale
-                if 0.05 < d < 3.0:
+                if config.sampling_min_depth < d < config.sampling_max_depth:
                     valid_depths.append(d)
         
         if valid_depths:
             valid_depths.sort()
-            return valid_depths[len(valid_depths) // 2]  # 중앙값
+            if config.sampling_method == 'median':
+                return valid_depths[len(valid_depths) // 2]
+            else:  # mean
+                return sum(valid_depths) / len(valid_depths)
         
         return 0.0
     
-    def pixel_to_3d(self, x: int, y: int, depth_image: np.ndarray
-                   ) -> Optional[Tuple[float, float, float]]:
+    def pixel_to_3d(self, x: int, y: int, depth_image: np.ndarray,
+                   config: DepthSamplingConfig) -> Optional[Tuple[float, float, float]]:
         """픽셀 좌표를 3D 좌표로 변환 (미터)"""
-        depth = self.get_depth_at(x, y, depth_image)
+        depth = self.get_depth_at(x, y, depth_image, config)
         
         if depth <= 0 or self._intrinsics is None:
             return None
@@ -318,37 +430,9 @@ class RealSenseCamera:
 
 # 감지기 클래스
 
-@dataclass
-class DetectorConfig:
-    """감지기 설정"""
-    # 이진화
-    threshold: int = 200
-    
-    # ROI (Region of Interest)
-    roi_x: int = 190
-    roi_y: int = 140
-    roi_w: int = 230
-    roi_h: int = 180
-    
-    # 면적 필터
-    min_area: int = 90
-    max_area: int = 4000
-    
-    # 형태 필터
-    min_aspect: float = 0.5
-    max_aspect: float = 3.0
-    min_solidity: float = 0.7
-    
-    # 깊이 필터
-    min_depth: float = 0.1
-    max_depth: float = 2.0
-
-
 class BlockDetector:
     """블록 감지기"""
     
-
-
     def __init__(self, config: Optional[DetectorConfig] = None):
         self.config = config or DetectorConfig()
         self._binary_view: Optional[np.ndarray] = None
@@ -361,36 +445,32 @@ class BlockDetector:
     @property
     def roi(self) -> Tuple[int, int, int, int]:
         """현재 ROI (x, y, w, h)"""
-        c = self.config
-        return (c.roi_x, c.roi_y, c.roi_w, c.roi_h)
+        c = self.config.roi
+        return (c.x, c.y, c.width, c.height)
     
     def detect(self, frame: np.ndarray, depth_image: np.ndarray,
                camera: RealSenseCamera) -> List[Block]:
-        """
-        프레임에서 블록 감지
-        
-        Args:
-            frame: BGR 컬러 이미지
-            depth_image: 깊이 이미지 (uint16)
-            camera: RealSenseCamera 인스턴스
-            
-        Returns:
-            감지된 Block 리스트
-        """
+        """프레임에서 블록 감지"""
         cfg = self.config
+        roi_cfg = cfg.roi
+        img_cfg = cfg.image_processing
         blocks = []
         
         # ROI 추출
-        roi = frame[cfg.roi_y:cfg.roi_y+cfg.roi_h, 
-                   cfg.roi_x:cfg.roi_x+cfg.roi_w]
+        roi = frame[roi_cfg.y:roi_cfg.y+roi_cfg.height, 
+                   roi_cfg.x:roi_cfg.x+roi_cfg.width]
         
         # 전처리
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        blurred = cv2.GaussianBlur(gray, 
+                                   (img_cfg.blur_kernel_size, 
+                                    img_cfg.blur_kernel_size), 0)
         _, binary = cv2.threshold(blurred, cfg.threshold, 255, cv2.THRESH_BINARY)
         
         # 모폴로지 연산
-        kernel = np.ones((3, 3), np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, 
+                                          (img_cfg.morph_kernel_size, 
+                                           img_cfg.morph_kernel_size))
         binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
         binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
         self._binary_view = binary
@@ -410,10 +490,14 @@ class BlockDetector:
                          camera: RealSenseCamera) -> Optional[Block]:
         """단일 컨투어 처리"""
         cfg = self.config
+        cf = cfg.contour_filter
+        df = cfg.depth_filter
+        img_cfg = cfg.image_processing
+        roi_cfg = cfg.roi
         
         # 면적 필터
         area = cv2.contourArea(cnt)
-        if not (cfg.min_area < area < cfg.max_area):
+        if not (cf.min_area < area < cf.max_area):
             return None
         
         # 회전 사각형
@@ -427,7 +511,7 @@ class BlockDetector:
         
         # 종횡비 필터
         aspect = max(w, h) / min(w, h)
-        if not (cfg.min_aspect <= aspect <= cfg.max_aspect):
+        if not (cf.min_aspect_ratio <= aspect <= cf.max_aspect_ratio):
             return None
         
         # Solidity 필터
@@ -436,37 +520,37 @@ class BlockDetector:
         if hull_area == 0:
             return None
         solidity = area / hull_area
-        if solidity < cfg.min_solidity:
+        if solidity < cf.min_solidity:
             return None
         
         # 꼭지점 수 필터
         peri = cv2.arcLength(cnt, True)
-        approx = cv2.approxPolyDP(cnt, 0.04 * peri, True)
-        if not (3 <= len(approx) <= 8):
+        approx = cv2.approxPolyDP(cnt, img_cfg.contour_approx_epsilon * peri, True)
+        if not (img_cfg.min_vertices <= len(approx) <= img_cfg.max_vertices):
             return None
         
         # 전역 좌표로 변환
         box_global = box.copy()
-        box_global[:, 0] += cfg.roi_x
-        box_global[:, 1] += cfg.roi_y
+        box_global[:, 0] += roi_cfg.x
+        box_global[:, 1] += roi_cfg.y
         
         cnt_global = cnt.copy()
-        cnt_global[:, :, 0] += cfg.roi_x
-        cnt_global[:, :, 1] += cfg.roi_y
+        cnt_global[:, :, 0] += roi_cfg.x
+        cnt_global[:, :, 1] += roi_cfg.y
         
         # 중심점 계산
         M = cv2.moments(cnt)
         if M["m00"] == 0:
             return None
-        cx = int(M["m10"] / M["m00"]) + cfg.roi_x
-        cy = int(M["m01"] / M["m00"]) + cfg.roi_y
+        cx = int(M["m10"] / M["m00"]) + roi_cfg.x
+        cy = int(M["m01"] / M["m00"]) + roi_cfg.y
         
         # 바운딩 박스
         x, y, bw, bh = cv2.boundingRect(cnt)
         
         # Block 생성
         block = Block(
-            bbox=(x + cfg.roi_x, y + cfg.roi_y, bw, bh),
+            bbox=(x + roi_cfg.x, y + roi_cfg.y, bw, bh),
             center_2d=(cx, cy),
             contour=cnt_global,
             rotated_box=box_global,
@@ -477,20 +561,19 @@ class BlockDetector:
         )
         
         # 3D 정보 추가
-        point_3d = camera.pixel_to_3d(cx, cy, depth_image)
+        point_3d = camera.pixel_to_3d(cx, cy, depth_image, cfg.depth_sampling)
         
         if point_3d:
             block.center_3d = point_3d
             block.depth = point_3d[2]
             
-            if cfg.min_depth < block.depth < cfg.max_depth:
-                # minAreaRect의 w, h 사용
+            if df.min_depth < block.depth < df.max_depth:
                 real_w, real_h = camera.calc_real_size(w, h, block.depth)
                 block.real_width_mm = real_w
                 block.real_height_mm = real_h
         
         return block
-    
+
 
 # 통합 시스템 클래스
 
@@ -514,8 +597,6 @@ class BlockDetectionSystem:
         self._clicked_blocks: List[Block] = []
         self._clicked_floor_points: List[FloorPoint] = []
     
-    # -------------------- Context Manager --------------------
-    
     def __enter__(self) -> "BlockDetectionSystem":
         self.start()
         return self
@@ -524,11 +605,9 @@ class BlockDetectionSystem:
         self.stop()
         return False
     
-    # -------------------- 생명주기 --------------------
-    
     def start(self) -> bool:
         """시스템 시작"""
-        return self._camera.start()
+        return self._camera.start(self._detector.config.image_processing)
     
     def stop(self):
         """시스템 정지"""
@@ -538,8 +617,6 @@ class BlockDetectionSystem:
     @property
     def is_running(self) -> bool:
         return self._camera.is_running
-    
-    # -------------------- 설정 접근 --------------------
     
     @property
     def config(self) -> DetectorConfig:
@@ -560,15 +637,8 @@ class BlockDetectionSystem:
         """감지기 인스턴스 (고급 사용)"""
         return self._detector
     
-    # -------------------- 핵심 기능 --------------------
-    
     def update(self) -> bool:
-        """
-        새 프레임을 가져와서 블록 감지 수행
-        
-        Returns:
-            성공 여부
-        """
+        """새 프레임을 가져와서 블록 감지 수행"""
         color, depth = self._camera.get_frames()
         if color is None:
             return False
@@ -579,12 +649,7 @@ class BlockDetectionSystem:
         return True
     
     def get_blocks(self, update: bool = True) -> List[Block]:
-        """
-        감지된 블록 리스트 반환
-        
-        Args:
-            update: True면 새 프레임으로 갱신 후 반환
-        """
+        """감지된 블록 리스트 반환"""
         if update:
             self.update()
         return self._last_blocks.copy()
@@ -595,12 +660,11 @@ class BlockDetectionSystem:
         return [b for b in blocks if b.is_valid]
     
     def _is_already_clicked(self, block: Block) -> bool:
-        """이미 클릭된 블록인지 확인 (bbox 기준)"""
+        """이미 클릭된 블록인지 확인"""
         for b in self._clicked_blocks:
             if b.bbox == block.bbox:
                 return True
         return False
-    # -------------------- 클릭 블록 관리 --------------------
     
     def get_clicked_blocks(self) -> List[Block]:
         """클릭한 블록 리스트 반환"""
@@ -616,7 +680,6 @@ class BlockDetectionSystem:
         self._clicked_floor_points.clear()
         print("🗑️  클릭 블록 리스트 초기화됨")
     
-   
     def print_clicked_blocks_summary(self):
         """클릭한 블록들의 요약 정보 출력"""
         if not self._clicked_blocks:
@@ -659,8 +722,6 @@ class BlockDetectionSystem:
 
         print("=" * 60)
     
-    # -------------------- 편의 메서드 --------------------
-    
     def get_closest_block(self, update: bool = True) -> Optional[Block]:
         """가장 가까운 블록 반환"""
         blocks = self.get_valid_blocks(update)
@@ -676,14 +737,14 @@ class BlockDetectionSystem:
         return max(blocks, key=lambda b: b.depth)
     
     def get_largest_block(self, update: bool = True) -> Optional[Block]:
-        """가장 큰 블록 반환 (면적 기준)"""
+        """가장 큰 블록 반환"""
         blocks = self.get_blocks(update)
         if not blocks:
             return None
         return max(blocks, key=lambda b: b.area)
     
     def get_smallest_block(self, update: bool = True) -> Optional[Block]:
-        """가장 작은 블록 반환 (면적 기준)"""
+        """가장 작은 블록 반환"""
         blocks = self.get_blocks(update)
         if not blocks:
             return None
@@ -693,13 +754,11 @@ class BlockDetectionSystem:
         """감지된 블록 수"""
         return len(self.get_blocks(update))
     
-    # -------------------- 필터링 --------------------
-    
     def find_blocks_in_depth_range(self,
                                    min_depth: float = 0,
                                    max_depth: float = float('inf'),
                                    update: bool = True) -> List[Block]:
-        """특정 깊이 범위의 블록들 반환 (미터 단위)"""
+        """특정 깊이 범위의 블록들 반환"""
         blocks = self.get_valid_blocks(update)
         return [b for b in blocks if min_depth <= b.depth <= max_depth]
     
@@ -712,8 +771,6 @@ class BlockDetectionSystem:
             if bx <= x <= bx + bw and by <= y <= by + bh:
                 return block
         return None
-    
-    # -------------------- 프레임 접근 --------------------
     
     @property
     def last_frame(self) -> Optional[np.ndarray]:
@@ -730,34 +787,22 @@ class BlockDetectionSystem:
         """마지막 감지 결과"""
         return self._last_blocks.copy()
     
-    # -------------------- 깊이 조회 --------------------
-    
     def get_depth_at(self, x: int, y: int) -> float:
-        """특정 픽셀의 깊이값 (미터)"""
+        """특정 픽셀의 깊이값"""
         if self._last_depth is None:
             return 0.0
-        return self._camera.get_depth_at(x, y, self._last_depth)
+        return self._camera.get_depth_at(x, y, self._last_depth, 
+                                         self._detector.config.depth_sampling)
     
     def get_3d_at(self, x: int, y: int) -> Optional[Tuple[float, float, float]]:
-        """특정 픽셀의 3D 좌표 (미터)"""
+        """특정 픽셀의 3D 좌표"""
         if self._last_depth is None:
             return None
-        return self._camera.pixel_to_3d(x, y, self._last_depth)
-    
-    # -------------------- 디버그 GUI --------------------
+        return self._camera.pixel_to_3d(x, y, self._last_depth,
+                                        self._detector.config.depth_sampling)
     
     def run_debug(self):
-        """
-        디버그 GUI 실행
-        
-        조작:
-            - 블록 클릭: 상세 정보 출력 및 리스트 저장
-            - 빈 공간 클릭: 해당 위치 깊이 출력
-            - 트랙바: 감지 파라미터 조정
-            - 'p' 키: 클릭한 블록 요약 출력
-            - 'c' 키: 클릭한 블록 리스트 초기화
-            - ESC: 종료
-        """
+        """디버그 GUI 실행"""
         print("\n" + "=" * 50)
         print("🏗️ Block Detection - Debug Mode")
         print("=" * 50)
@@ -777,9 +822,6 @@ class BlockDetectionSystem:
             if event != cv2.EVENT_LBUTTONDOWN:
                 return
 
-            # =========================
-            # 1️⃣ 블록 클릭 검사
-            # =========================
             for i, block in enumerate(self._last_blocks):
                 bx, by, bw, bh = block.bbox
                 if bx <= x <= bx + bw and by <= y <= by + bh:
@@ -797,11 +839,8 @@ class BlockDetectionSystem:
                     self._print_block_info(block_copy)
 
                     print(f"💾 블록 저장 완료 (총 {len(self._clicked_blocks)}개)")
-                    return  # ⭐ 블록이면 여기서 반드시 종료
+                    return
 
-            # =========================
-            # 2️⃣ 빈 공간 클릭 (바닥)
-            # =========================
             selected_idx = -1
 
             depth = self.get_depth_at(x, y)
@@ -825,7 +864,6 @@ class BlockDetectionSystem:
                 print("  깊이 없음")
 
             print(f"  총 바닥 클릭 수: {len(self._clicked_floor_points)}")
-                    
         
         cv2.namedWindow("Result")
         cv2.setMouseCallback("Result", on_mouse)
@@ -834,48 +872,42 @@ class BlockDetectionSystem:
         cv2.createTrackbar("Threshold", "Control", 
                           self.config.threshold, 255, lambda x: None)
         cv2.createTrackbar("Min Area", "Control", 
-                          self.config.min_area, 5000, lambda x: None)
+                          self.config.contour_filter.min_area, 5000, lambda x: None)
         cv2.createTrackbar("Max Area", "Control", 
-                          self.config.max_area, 30000, lambda x: None)
+                          self.config.contour_filter.max_area, 30000, lambda x: None)
         
         try:
             while True:
                 # 트랙바 값 적용
                 self.config.threshold = cv2.getTrackbarPos("Threshold", "Control")
-                self.config.min_area = cv2.getTrackbarPos("Min Area", "Control")
-                self.config.max_area = cv2.getTrackbarPos("Max Area", "Control")
+                self.config.contour_filter.min_area = cv2.getTrackbarPos("Min Area", "Control")
+                self.config.contour_filter.max_area = cv2.getTrackbarPos("Max Area", "Control")
                 
-                # 업데이트
                 if not self.update():
                     continue
                 
-                # 결과 그리기
                 display = self._draw_result(selected_idx)
                 
-                # 클릭 카운트 표시
                 cv2.putText(display, f"Clicked: {len(self._clicked_blocks)}", 
                            (10, 60),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
                 
                 cv2.imshow("Result", display)
                 
-                # 이진화 이미지
                 if self._detector.binary_view is not None:
                     cv2.imshow("Binary (ROI)", self._detector.binary_view)
                 
-                # 깊이 시각화
                 depth_display = self._draw_depth()
                 cv2.imshow("Depth", depth_display)
                 
-                # 키 입력 처리
                 key = cv2.waitKey(1) & 0xFF
                 
-                if key == 27:  # ESC
+                if key == 27:
                     break
-                elif key == ord('p'):  # 요약 출력
+                elif key == ord('p'):
                     self.print_clicked_blocks_summary()
                     self.print_clicked_floor_points_summary()
-                elif key == ord('c'):  # 초기화
+                elif key == ord('c'):
                     self.clear_clicked_blocks()
                     
         except KeyboardInterrupt:
@@ -890,17 +922,15 @@ class BlockDetectionSystem:
     def _draw_result(self, selected_idx: int = -1) -> np.ndarray:
         """결과 이미지 그리기"""
         display = self._last_frame.copy()
-        cfg = self.config
+        roi_cfg = self.config.roi
         
-        # ROI 표시
         cv2.rectangle(display, 
-                     (cfg.roi_x, cfg.roi_y),
-                     (cfg.roi_x + cfg.roi_w, cfg.roi_y + cfg.roi_h),
+                     (roi_cfg.x, roi_cfg.y),
+                     (roi_cfg.x + roi_cfg.width, roi_cfg.y + roi_cfg.height),
                      (0, 0, 255), 2)
-        cv2.putText(display, "ROI (WHITE)", (cfg.roi_x, cfg.roi_y - 10),
+        cv2.putText(display, "ROI (WHITE)", (roi_cfg.x, roi_cfg.y - 10),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
         
-        # 블록 그리기
         for i, block in enumerate(self._last_blocks):
             is_selected = (i == selected_idx)
             color = (0, 255, 255) if is_selected else (0, 255, 0)
@@ -925,7 +955,6 @@ class BlockDetectionSystem:
             cv2.putText(display, f"({cx},{cy})", (cx - 25, cy + 20),
                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
         
-        # 블록 수 표시
         cv2.putText(display, f"Blocks: {len(self._last_blocks)}", (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         
@@ -964,22 +993,9 @@ class BlockDetectionSystem:
             print("  ⚠️ 깊이 정보 없음")
         
         print("=" * 50 + "\n")
-    
-    def _print_depth_info(self, x: int, y: int):
-        """빈 공간 깊이 정보 출력"""
-        print(f"\n빈 공간 클릭 ({x}, {y})")
-        
-        depth = self.get_depth_at(x, y)
-        if depth > 0:
-            print(f"  → 깊이: {depth * 100:.1f}cm")
-            
-            point_3d = self.get_3d_at(x, y)
-            if point_3d:
-                X, Y, Z = point_3d
-                print(f"  → 3D 좌표: X={X*1000:.1f}mm, Y={Y*1000:.1f}mm, Z={Z*1000:.1f}mm")
-        else:
-            print("  → 깊이 측정 불가\n")
 
+
+# ===== 전역 함수들 =====
 
 def stop_system():
     """카메라 및 시스템 종료"""
@@ -988,6 +1004,8 @@ def stop_system():
     if _system is not None:
         _system.stop()
         _system = None
+
+
 def get_clicked_blocks():
     """저장된 블록 리스트 반환"""
     if _system is None:
@@ -1001,16 +1019,14 @@ def get_clicked_floor_points():
         return []
     return _system.get_clicked_floor_points()
 
+
 def get_block_summaries():
-    """
-    클릭된 블록에서 필요한 값만 추려서 리스트로 반환
-    """
+    """클릭된 블록 요약 반환"""
     if _system is None:
         raise RuntimeError("System not started")
 
     summaries = []
-
-    for b in _system.get_clicked_blocks():  # 🔥 직접 접근 말고 메서드 사용
+    for b in _system.get_clicked_blocks():
         if b.center_3d is None:
             continue
 
@@ -1023,7 +1039,9 @@ def get_block_summaries():
 
     return summaries
 
+
 def get_floor_summaries():
+    """클릭된 바닥 포인트 요약 반환"""
     global _system
     if _system is None:
         raise RuntimeError("System not started")
@@ -1040,10 +1058,7 @@ def get_floor_summaries():
 
 
 def run_gui():
-    """
-    디버그 GUI 실행
-    (start_system()이 먼저 호출되어야 함)
-    """
+    """디버그 GUI 실행"""
     if _system is None:
         raise RuntimeError("System not started. Call start_system() first.")
 
@@ -1051,10 +1066,7 @@ def run_gui():
 
 
 def start_system():
-    """
-    BlockDetectionSystem을 생성하고 카메라를 시작
-    (이미 있으면 기존 인스턴스 반환)
-    """
+    """BlockDetectionSystem 시작"""
     global _system
 
     if _system is None:
