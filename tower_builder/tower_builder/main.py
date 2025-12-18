@@ -71,19 +71,6 @@ class RobotControllerNode(Node):
         if self.gripper: 
             self.gripper.terminate()
 
-<<<<<<< HEAD
-    # ---------------------------
-    # [필살기 1] 그리퍼 전원 강제 공급
-    # ---------------------------
-    def force_gripper_power_on(self):
-        print("\n⚡ [강제 명령] 그리퍼 전원 24V 공급 시도 중...")
-        cmd = f"ros2 service call /{ROBOT_ID}/tool/set_tool_voltage dsr_msgs/srv/SetToolVoltage \"{{voltage: 24}}\""
-        result = os.system(cmd)
-        print("✅ 전원 공급 명령 전송 완료!" if result == 0 else "⚠️ 전원 공급 명령 실패")
-        time.sleep(1)
-=======
-
->>>>>>> origin/junpyo
 
     # ---------------------------
     # 마우스 클릭 이벤트
@@ -133,22 +120,8 @@ class RobotControllerNode(Node):
         stack_x, stack_y = self.stack_base_coords
 
         try:
-<<<<<<< HEAD
-            # 1. 전원 강제 공급
-            self.force_gripper_power_on()
-
-            # 2. 그리퍼 워밍업
-            if self.gripper:
-                print("✊ 그리퍼 테스트 동작...")
-                for p in [0, 800, 0]:
-                    self.gripper.move(p)
-                    wait(0.5)
-
-            # 3. 홈 위치 이동
-=======
             
             # 3. 홈 정렬
->>>>>>> origin/junpyo
             print("🏠 홈 위치 정렬...")
             home_pose = posj(0, 0, 90, 0, 90, 0)
             movej(home_pose, vel=VELOCITY, acc=ACC)
@@ -169,31 +142,6 @@ class RobotControllerNode(Node):
             self.stack_base_coords = None
             self.is_working = False
 
-<<<<<<< HEAD
-    # ---------------------------
-    # [수정됨] 개별 블럭 픽앤플레이스
-    # ---------------------------
-    def pick_and_place_block(self, block, stack_x, stack_y, base_z, block_h, layer):
-        from DSR_ROBOT2 import get_current_posx, movel, wait
-        from DR_common2 import posx
-
-        # 1. Vision 데이터 가져오기 (첫 번째 코드의 Block 클래스 속성 사용)
-        if block.center_3d_mm is None:
-            print("❌ 오류: 블록의 3D 좌표가 없습니다.")
-            return
-
-        cam_x, cam_y, cam_z = block.center_3d_mm  # mm 단위 (x, y, depth)
-        block_angle = block.angle                 # 회전 각도
-
-        # 2. 좌표 변환 (카메라 좌표계 -> 로봇 좌표계)
-        # 카메라 설치 방향에 따라 X, Y 매핑이 다를 수 있습니다. (현재 설정 유지)
-        target_x = TRANSFORM_OFFSET_X + cam_y
-        target_y = TRANSFORM_OFFSET_Y + cam_x
-        
-        # 높이 계산 (카메라 높이 - 물체까지의 거리 = 물체의 높이)
-        # 바닥 긁힘 방지를 위해 +2mm 정도 여유를 둡니다.
-        pick_z = (CAMERA_Z_HEIGHT - cam_z) + 2.0 
-=======
    # ============================================================
     # [수정 완료] 타이밍 대폭 늘림 + 그리퍼 악력 강화
     # ============================================================
@@ -215,27 +163,10 @@ class RobotControllerNode(Node):
         # 현재 자세 회전값(Rx, Ry, Rz) 유지
         cur_x = get_current_posx()[0]
         rx, ry, rz = cur_x[3], cur_x[4], cur_x[5]
->>>>>>> origin/junpyo
         
         # Z축 안전 높이 (바닥보다 충분히 높게)
         safe_z = 350.0
 
-<<<<<<< HEAD
-        # 적재할 위치 (Stack Position)
-        place_x = stack_x
-        place_y = stack_y
-        place_z = base_z + (layer * block_h)
-
-        # 3. 그리퍼 회전 계산 (rz)
-        # 현재 로봇의 자세를 가져옵니다.
-        cur_pos = get_current_posx()[0]
-        rx, ry = cur_pos[3], cur_pos[4] # rx, ry는 유지 (수직 하강)
-        
-        # 블록 각도에 맞춰 그리퍼 회전 (카메라-로봇 좌표계 차이에 따라 보정 필요할 수 있음)
-        # OpenCV 각도는 보통 -90~0 또는 0~90도입니다. 로봇에 맞게 부호를 조정합니다.
-        # 예: 로봇 Rz = 기본각도 + 블록각도
-        pick_rz = block_angle 
-=======
         # ----------------------------------------------------
         # [PICK] 잡으러 가기
         # ----------------------------------------------------
@@ -243,7 +174,6 @@ class RobotControllerNode(Node):
         p_pick_ready = posx([px, py, safe_z, rx, ry, rz])
         movel(p_pick_ready, vel=VELOCITY, acc=ACC)
         wait(3.0) # [중요] 로봇이 도착할 때까지 충분히 기다림
->>>>>>> origin/junpyo
         
         # 적재할 때는 정렬해야 하므로 0도(또는 90도)로 설정
         place_rz = 0.0 
@@ -264,21 +194,6 @@ class RobotControllerNode(Node):
         
         # 그리퍼 벌리기
         if self.gripper: self.gripper.move(target_open)
-<<<<<<< HEAD
-        wait(0.5)
-
-        # [이동 2] 집는 위치로 하강
-        movel(posx([target_x, target_y, pick_z, rx, ry, pick_rz]), vel=VELOCITY/2, acc=ACC/2)
-        wait(0.5)
-
-        # 그리퍼 닫기 (집기)
-        if self.gripper: self.gripper.move(target_close)
-        print("   ✊ 그립!")
-        wait(1.0)
-
-        # [이동 3] 다시 상공으로 상승
-        movel(posx([target_x, target_y, safe_z, rx, ry, pick_rz]), vel=VELOCITY, acc=ACC)
-=======
         wait(1.0) # 벌리는 시간 확보
         
         # 3. 내려가기
@@ -318,7 +233,6 @@ class RobotControllerNode(Node):
         print("   🔼 [8] 복귀 중...")
         movel(p_place_ready, vel=VELOCITY, acc=ACC)
         wait(2.0)
->>>>>>> origin/junpyo
 
         # [이동 4] 적재 위치 상공으로 이동 (적재 각도로 회전)
         movel(posx([place_x, place_y, safe_z, rx, ry, place_rz]), vel=VELOCITY, acc=ACC)
