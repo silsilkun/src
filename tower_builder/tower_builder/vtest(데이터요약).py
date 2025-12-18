@@ -29,3 +29,6 @@ for f in floors:
 
 # 5️⃣ 시스템 종료
 v9.stop_system()
+
+#import v9
+#v9.start_system()
