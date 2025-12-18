@@ -149,6 +149,7 @@ class DetectorConfig:
     image_processing: ImageProcessingConfig = field(default_factory=ImageProcessingConfig)
     depth_sampling: DepthSamplingConfig = field(default_factory=DepthSamplingConfig)
     cache: CacheConfig = field(default_factory=CacheConfig)
+    camera_warmup: CameraWarmupConfig = field(default_factory=CameraWarmupConfig)
 
 
 # 데이터 클래스
@@ -299,10 +300,13 @@ class RealSenseCamera:
     def depth_scale(self) -> float:
         return self._depth_scale
     
-    def start(self, warmup_config: CameraWarmupConfig) -> bool:
+    def start(self, warmup_config: Optional[CameraWarmupConfig] = None) -> bool:
         """카메라 시작"""
         if self._is_running:
             return True
+        
+        if warmup_config is None:
+            warmup_config = CameraWarmupConfig()
             
         try:
             self._pipeline = rs.pipeline()
@@ -607,7 +611,7 @@ class BlockDetectionSystem:
     
     def start(self) -> bool:
         """시스템 시작"""
-        return self._camera.start(self._detector.config.image_processing)
+        return self._camera.start(self._detector.config.camera_warmup)
     
     def stop(self):
         """시스템 정지"""
