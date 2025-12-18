@@ -161,51 +161,94 @@ class RobotControllerNode(Node):
             self.is_working = False
 
     # ---------------------------
-    # 개별 블럭 픽앤플레이스
+    # [수정됨] 개별 블럭 픽앤플레이스
     # ---------------------------
     def pick_and_place_block(self, block, stack_x, stack_y, base_z, block_h, layer):
         from DSR_ROBOT2 import get_current_posx, movel, wait
         from DR_common2 import posx
 
-        # 좌표 계산
-        cam_x, cam_y, cam_z = block.center_3d_mm
-        px = TRANSFORM_OFFSET_X + cam_y
-        py = cam_x + TRANSFORM_OFFSET_Y
-        pz = max(CAMERA_Z_HEIGHT - cam_z, base_z)
-        sx, sy, sz = stack_x, stack_y, base_z + layer * block_h
+        # 1. Vision 데이터 가져오기 (첫 번째 코드의 Block 클래스 속성 사용)
+        if block.center_3d_mm is None:
+            print("❌ 오류: 블록의 3D 좌표가 없습니다.")
+            return
 
+        cam_x, cam_y, cam_z = block.center_3d_mm  # mm 단위 (x, y, depth)
+        block_angle = block.angle                 # 회전 각도
+
+        # 2. 좌표 변환 (카메라 좌표계 -> 로봇 좌표계)
+        # 카메라 설치 방향에 따라 X, Y 매핑이 다를 수 있습니다. (현재 설정 유지)
+        target_x = TRANSFORM_OFFSET_X + cam_y
+        target_y = TRANSFORM_OFFSET_Y + cam_x
+        
+        # 높이 계산 (카메라 높이 - 물체까지의 거리 = 물체의 높이)
+        # 바닥 긁힘 방지를 위해 +2mm 정도 여유를 둡니다.
+        pick_z = (CAMERA_Z_HEIGHT - cam_z) + 2.0 
+        
+        # Z축 안전 높이 (바닥보다 충분히 높게)
+        safe_z = 350.0
+
+        # 적재할 위치 (Stack Position)
+        place_x = stack_x
+        place_y = stack_y
+        place_z = base_z + (layer * block_h)
+
+        # 3. 그리퍼 회전 계산 (rz)
+        # 현재 로봇의 자세를 가져옵니다.
+        cur_pos = get_current_posx()[0]
+        rx, ry = cur_pos[3], cur_pos[4] # rx, ry는 유지 (수직 하강)
+        
+        # 블록 각도에 맞춰 그리퍼 회전 (카메라-로봇 좌표계 차이에 따라 보정 필요할 수 있음)
+        # OpenCV 각도는 보통 -90~0 또는 0~90도입니다. 로봇에 맞게 부호를 조정합니다.
+        # 예: 로봇 Rz = 기본각도 + 블록각도
+        pick_rz = block_angle 
+        
+        # 적재할 때는 정렬해야 하므로 0도(또는 90도)로 설정
+        place_rz = 0.0 
+
+        # 4. 그리퍼 폭 결정 (블록 크기에 따라)
         width = min(block.real_width_mm, block.real_height_mm)
-        target_open, target_close = (0, 500)
         if width <= 35: target_open, target_close = 300, 850
         elif width <= 45: target_open, target_close = 200, 600
         else: target_open, target_close = 0, 350
 
-        cur_x = get_current_posx()[0]
-        rx, ry, rz = cur_x[3], cur_x[4], cur_x[5]
-        safe_z = 350.0
+        print(f"   📍 PICK: X{target_x:.1f} Y{target_y:.1f} Z{pick_z:.1f} Rz{pick_rz:.1f}")
+        print(f"   📍 PLACE: X{place_x:.1f} Y{place_y:.1f} Z{place_z:.1f}")
 
-        print(f"   👉 PICK 좌표: {px:.1f}, {py:.1f}, {pz:.1f}")
-        print(f"   👉 PLACE 좌표: {sx:.1f}, {sy:.1f}, {sz:.1f}")
-
-        # Pick
-        movel(posx([px, py, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-        wait(0.2)
+        # --- 동작 시퀀스 시작 ---
+        
+        # [이동 1] 집는 위치 상공으로 이동 (회전 적용)
+        movel(posx([target_x, target_y, safe_z, rx, ry, pick_rz]), vel=VELOCITY, acc=ACC)
+        
+        # 그리퍼 벌리기
         if self.gripper: self.gripper.move(target_open)
-        movel(posx([px, py, pz, rx, ry, rz]), vel=VELOCITY/2, acc=ACC/2)
         wait(0.5)
-        if self.gripper: self.gripper.move(target_close)
-        print("   ✊ [3] 그립!")
-        wait(1.5)
-        movel(posx([px, py, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
 
-        # Place
-        movel(posx([sx, sy, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-        movel(posx([sx, sy, sz + 15, rx, ry, rz]), vel=VELOCITY/2, acc=ACC/2)
+        # [이동 2] 집는 위치로 하강
+        movel(posx([target_x, target_y, pick_z, rx, ry, pick_rz]), vel=VELOCITY/2, acc=ACC/2)
         wait(0.5)
-        if self.gripper: self.gripper.move(0)
-        print("   🖐 [6] 놓기 완료")
-        wait(0.8)
-        movel(posx([sx, sy, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
+
+        # 그리퍼 닫기 (집기)
+        if self.gripper: self.gripper.move(target_close)
+        print("   ✊ 그립!")
+        wait(1.0)
+
+        # [이동 3] 다시 상공으로 상승
+        movel(posx([target_x, target_y, safe_z, rx, ry, pick_rz]), vel=VELOCITY, acc=ACC)
+
+        # [이동 4] 적재 위치 상공으로 이동 (적재 각도로 회전)
+        movel(posx([place_x, place_y, safe_z, rx, ry, place_rz]), vel=VELOCITY, acc=ACC)
+
+        # [이동 5] 적재 위치로 하강
+        # 블록을 놓을 때는 살짝 위(place_z + 10mm)까지만 빠르게 가고, 마지막은 천천히
+        movel(posx([place_x, place_y, place_z + 10, rx, ry, place_rz]), vel=VELOCITY/2, acc=ACC/2)
+        
+        # 그리퍼 열기 (놓기)
+        if self.gripper: self.gripper.move(0) # 완전히 열기
+        print("   🖐 놓기 완료")
+        wait(0.5)
+
+        # [이동 6] 적재 후 상승
+        movel(posx([place_x, place_y, safe_z, rx, ry, place_rz]), vel=VELOCITY, acc=ACC)
 
     # ---------------------------
     # 비전 프레임 처리 및 렌더링
