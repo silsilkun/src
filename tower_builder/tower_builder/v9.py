@@ -611,30 +611,6 @@ class BlockDetectionSystem:
         """클릭한 바닥 포인트 리스트 반환"""
         return self._clicked_floor_points.copy()
     
-    def get_block_summaries():
-        """
-        클릭된 블록에서 필요한 값만 추려서 리스트로 반환
-        """
-        if _system is None:
-            raise RuntimeError("System not started")
-
-        summaries = []
-
-        for b in _system.get_clicked_blocks():  # 🔥 직접 접근 말고 메서드 사용
-            if b.center_3d is None:
-                continue
-
-            summaries.append({
-                "center_3d": tuple(float(x) for x in b.center_3d),
-                "angle": float(b.angle),
-                "real_width_mm": float(b.real_width_mm),
-                "click_order": int(b.click_order)
-            })
-
-        return summaries
-
-
-    
     def clear_clicked_blocks(self):
         """클릭한 블록 리스트 초기화"""
         self._clicked_blocks.clear()
