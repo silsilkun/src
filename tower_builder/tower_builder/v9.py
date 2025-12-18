@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import pyrealsense2 as rs
 from dataclasses import dataclass, field, asdict
-from typing import Optional, List, Tuple, Literal
+from typing import Optional, List, Tuple
 from contextlib import contextmanager
 from datetime import datetime
 
