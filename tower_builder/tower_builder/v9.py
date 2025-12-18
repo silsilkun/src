@@ -825,9 +825,6 @@ class BlockDetectionSystem:
                 print("  깊이 없음")
 
             print(f"  총 바닥 클릭 수: {len(self._clicked_floor_points)}")
-
-
-                    
                     
         
         cv2.namedWindow("Result")
