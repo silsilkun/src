@@ -1,3 +1,4 @@
+#딕셔너리
 import v9
 import threading
 import time

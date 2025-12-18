@@ -1,37 +1,29 @@
 """
-🏗️ Smart Tower Builder - NUCLEAR OPTION
-=======================================
-[최후의 수단 적용]
-1. 그리퍼 전원: os.system()으로 터미널 명령어 직접 주입 (라이브러리 의존 X)
-2. 동작 스킵 방지: movel(직선) 대신 movej(관절) 사용 (에러 무시하고 무조건 이동)
-3. 디버깅 로그: 로봇이 어디로 가려는지 좌표를 전부 출력
+🏗️ Smart Tower Builder - PERFECT INSTRUCTOR SYNC
+================================================
+[수정 완료]
+- execute_stacking_sequence 함수 내 'wait' 임포트 추가
 """
 
 import cv2
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
-import numpy as np
 import threading
 import time
-import os  # <--- [핵심] 터미널 명령어 사용을 위해 추가
+import numpy as np
 
 # 사용자 정의 모듈
 import DR_init
 from tower_builder.gripper_drl_controller import GripperController
-from tower_builder.camera import BlockDetectionSystem, Block
+from tower_builder.camera import BlockDetectionSystem
 
 # ============================================================
 # ⚙️ [설정]
 # ============================================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "e0509"
-VELOCITY, ACC = 100, 50 # 속도 조금 줄임 (정확도 향상)
-
-# 📍 좌표 보정
-TRANSFORM_OFFSET_X = 685.0
-TRANSFORM_OFFSET_Y = 20.0
-CAMERA_Z_HEIGHT = 810.0
+VELOCITY, ACC = 60, 60  # 속도 살짝 낮춰서 정확도 UP
 
 DR_init.__dsr__id = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
@@ -48,15 +40,19 @@ class RobotControllerNode(Node):
         self.blocks = []
         self.target_stack_count = 0
         self.selected_queue = []
-        self.stack_base_coords = None
+        self.stack_base_coords = None 
         self.is_working = False
 
+        # 그리퍼 초기화
         self.gripper = None
         try:
             self.gripper = GripperController(node=self, namespace=ROBOT_ID)
             time.sleep(1.0)
             if self.gripper.initialize():
-                self.get_logger().info("✅ 그리퍼 객체 생성됨")
+                self.get_logger().info("✅ 그리퍼 연결 성공")
+                # 초기화: 0 = Open (지나님 피셜)
+                self.gripper.move(0) 
+                time.sleep(1.0)
         except Exception as e:
             self.get_logger().error(f"그리퍼 오류: {e}")
 
@@ -67,19 +63,23 @@ class RobotControllerNode(Node):
         if self.gripper: self.gripper.terminate()
 
     # ============================================================
-    # [필살기 1] 터미널 명령어로 그리퍼 전원 강제 주입
+    # [핵심] 좌표 변환 (강사님 공식 + 지나님 Z값 825)
     # ============================================================
-    def force_gripper_power_on(self):
-        print("\n⚡ [강제 명령] 그리퍼 전원 24V 공급 시도 중...")
-        # 파이썬 라이브러리가 말을 안 들으니, 쉘 명령어로 직접 때립니다.
-        cmd = f"ros2 service call /{ROBOT_ID}/tool/set_tool_voltage dsr_msgs/srv/SetToolVoltage \"{{voltage: 24}}\""
-        result = os.system(cmd)
+    def convert_camera_to_robot(self, cam_x_mm, cam_y_mm, cam_z_mm):
+        # 1. X축: 635 + Y - 20 (강사님 공식)
+        final_x = 690 + cam_y_mm #- 15
         
-        if result == 0:
-            print("✅ 전원 공급 명령 전송 완료!")
-        else:
-            print("⚠️ 전원 공급 명령 실패 (하지만 이미 켜져있을 수도 있음)")
-        time.sleep(1.0)
+        # 2. Y축: X 그대로 (강사님 공식)
+        final_y = cam_x_mm
+        
+        # 3. Z축: 825 - Z (지나님 수정 값! 너무 깊게 안 박히게)
+        final_z = 823 - cam_z_mm
+
+        # 안전 바닥 높이 제한
+        if final_z <= 150.0: 
+            final_z = 150.0
+            
+        return final_x, final_y, final_z
 
     # ============================================================
     # 마우스 콜백
@@ -87,7 +87,7 @@ class RobotControllerNode(Node):
     def mouse_callback(self, event, x, y, flags, param):
         if event != cv2.EVENT_LBUTTONDOWN: return
         if self.is_working:
-            print("⚠️ 로봇이 움직이고 있습니다!")
+            print("⚠️ 로봇이 작업 중입니다! 잠시만 기다려주세요.")
             return
 
         # 1. 블럭 선택
@@ -104,197 +104,193 @@ class RobotControllerNode(Node):
                 if len(self.selected_queue) == self.target_stack_count:
                     print("\n🎯 블럭 선택 완료! [탑을 쌓을 바닥]을 클릭하세요.")
 
-        # 2. 위치 지정
+        # 2. 위치 지정 및 실행
         elif self.stack_base_coords is None:
             point_3d = self.vision.get_3d_at(x, y)
             if point_3d is None or point_3d[2] == 0:
-                print("⚠️ 바닥 인식 실패.")
+                print("⚠️ 바닥 인식 실패. 다시 클릭해주세요.")
                 return
 
-            cam_x_mm = point_3d[0] * 1000
-            cam_y_mm = point_3d[1] * 1000
+            rs_x_mm = point_3d[0] * 1000
+            rs_y_mm = point_3d[1] * 1000
+            rs_z_mm = point_3d[2] * 1000
 
-            final_x = TRANSFORM_OFFSET_X + cam_y_mm
-            final_y = cam_x_mm + TRANSFORM_OFFSET_Y
+            # 좌표 변환 적용
+            final_x, final_y, final_z = self.convert_camera_to_robot(rs_x_mm, rs_y_mm, rs_z_mm)
             
-            self.stack_base_coords = (final_x, final_y)
-            print(f"📍 타워 위치: ({final_x:.1f}, {final_y:.1f})")
+            self.stack_base_coords = (final_x, final_y, final_z)
+            print(f"📍 타워 위치(Base): X={final_x:.1f}, Y={final_y:.1f}, Z={final_z:.1f}")
             
             worker = threading.Thread(target=self.execute_stacking_sequence)
             worker.daemon = True
             worker.start()
 
     # ============================================================
-    # 실행 시퀀스
+    # 실행 시퀀스 (강사님 로직 100% 이식 + 직각 이동 보장)
     # ============================================================
     def execute_stacking_sequence(self):
         self.is_working = True
         print("\n🚀 로봇 작업 시퀀스 시작")
         
-        stack_x, stack_y = self.stack_base_coords
-        BASE_Z = 152.0
+        stack_x, stack_y, stack_base_z = self.stack_base_coords
         BLOCK_H = 40.0
 
-        from DSR_ROBOT2 import movej, movel, wait
-        from DR_common2 import posj, posx
+        # [수정] wait 추가 완료
+        from DSR_ROBOT2 import movel, movej, get_current_posx, wait
+        from DR_common2 import posx, posj
+
+        # # 타이밍 상수
+        # T_MOVE = 3.5
+        # T_SHORT = 1.5
+        # T_GRIP = 1.0
 
         try:
-            # 1. 전원 강제 공급
-            self.force_gripper_power_on()
-
-            # 2. 그리퍼 워밍업 (확인사살)
-            if self.gripper:
-                print("✊ 그리퍼 테스트 동작...")
-                self.gripper.move(0)
-                wait(0.5)
-                self.gripper.move(800)
-                wait(0.5)
-                self.gripper.move(0)
-                wait(0.5)
-
-            # 3. 홈 정렬
+            # 1. 홈 정렬
             print("🏠 홈 위치 정렬...")
             home_pose = posj(0, 0, 90, 0, 90, 0)
             movej(home_pose, vel=VELOCITY, acc=ACC)
-            wait(1.0)
+            wait(3)
 
-            # 4. 적재 루프
+            # 2. 적재 루프
             for i, block in enumerate(self.selected_queue):
-                print(f"\n🏗️ [{i+1}층 작업 시작] ---------------------")
+                print(f"\n🏗️ [{i+1}층 작업 시작] ===================")
 
-                # 좌표 계산
+                # --- 좌표 계산 ---
                 cam_x, cam_y, cam_z = block.center_3d_mm
-                pick_x = TRANSFORM_OFFSET_X + cam_y
-                pick_y = cam_x + TRANSFORM_OFFSET_Y
-                pick_z = CAMERA_Z_HEIGHT - cam_z
+                pick_x, pick_y, pick_z = self.convert_camera_to_robot(cam_x, cam_y, cam_z)
                 
-                if pick_z < BASE_Z: pick_z = BASE_Z
+                place_z = stack_base_z + (i * BLOCK_H)
 
-                width = min(block.real_width_mm, block.real_height_mm)
-                place_z = BASE_Z + (i * BLOCK_H)
+                # --- [강사님 핵심 로직] 접근 방향 및 Rz 계산 ---
+                # 현재 위치 가져오기
+                cur_pos = get_current_posx()[0]
+                cur_x, cur_y = cur_pos[0], cur_pos[1]
+                cur_rx, cur_ry = cur_pos[3], cur_pos[4] # Rx, Ry는 유지
 
-                # [디버깅] 좌표 출력 (이게 이상하면 계산이 틀린 것)
-                print(f"   👉 PICK 좌표: {pick_x:.1f}, {pick_y:.1f}, {pick_z:.1f}")
-                print(f"   👉 PLACE 좌표: {stack_x:.1f}, {stack_y:.1f}, {place_z:.1f}")
+                # 어느 쪽에서 접근하는지 계산 (강사님 코드 그대로)
+                dx, dy = pick_x - cur_x, pick_y - cur_y
+                if abs(dx) > abs(dy):
+                    approach_axis = "x+" if dx > 0 else "x-"
+                else:
+                    approach_axis = "y+" if dy > 0 else "y-"
 
-                # 픽앤플레이스 실행
-                self.move_smart_pick_and_place(pick_x, pick_y, pick_z, width,
-                                               stack_x, stack_y, place_z)
+                # 방향별 손목 회전(Rz) 설정 (이게 없으면 손목 꺾임!)
+                if approach_axis == "x+":   Rz_target = 180.0
+                elif approach_axis == "x-": Rz_target = 0.0
+                elif approach_axis == "y+": Rz_target = -90.0
+                elif approach_axis == "y-": Rz_target = 90.0
+                
+                print(f"   🧭 접근 방향: {approach_axis} -> Rz: {Rz_target}")
 
-            print("\n✨ 작업 완료! 홈 복귀.")
+                # 안전 높이 (이동 중 부딪히지 않게)
+                SAFE_Z = 350.0 
+
+                # 블럭 크기별 그리퍼 값 (지나님 설정)
+                w = min(block.real_width_mm, block.real_height_mm)
+                val_open = 0 
+                if w >= 45: val_close = 650
+                elif w >= 35: val_close = 550
+                else: val_close = 400
+
+                # ================= [PICK 동작] =================
+                
+                # 1) [XY 이동] 안전 높이에서 좌표만 먼저 맞춤 (직각 이동의 핵심!)
+                print("   🚀 [1] 상공 이동 (XY축 정렬)")
+                # Z는 Safe_Z, Rz는 계산된 값 적용
+                p_high = posx([pick_x, pick_y, SAFE_Z, cur_rx, cur_ry, Rz_target])
+                movel(p_high, vel=VELOCITY, acc=ACC)
+                # time.sleep(T_MOVE)
+                wait(3.5)
+
+                # 그리퍼 열기
+                if self.gripper: self.gripper.move(val_open)
+                wait(2)
+
+                # 2) [상공 접근] 목표지점 5cm 위로 접근 (강사님 target_up)
+                print("   🔻 [2] 목표 상공 진입 (z+50)")
+                p_ready = posx([pick_x, pick_y, pick_z + 50, cur_rx, cur_ry, Rz_target])
+                movel(p_ready, vel=VELOCITY, acc=ACC)
+                wait(2)
+
+                # 3) [하강] 진짜 잡으러 내려감 (강사님 target_at)
+                print(f"   🔻 [3] Pick 하강 (Z={pick_z:.1f})")
+                p_pick = posx([pick_x, pick_y, pick_z, cur_rx, cur_ry, Rz_target])
+                movel(p_pick, vel=VELOCITY/2, acc=ACC/2)
+                wait(3)
+
+                # 4) 잡기
+                print(f"   ✊ [4] 그립 ({val_close})")
+                if self.gripper: self.gripper.move(val_close)
+                wait(3)
+
+                # 5) 들어올리기
+                print("   🔼 [5] 상승")
+                movel(p_high, vel=VELOCITY, acc=ACC)
+                wait(3)
+
+                # ================= [PLACE 동작] =================
+                
+                # 6) [XY 이동] 타워 위치 상공으로 이동
+                print("   🚀 [6] Place 상공 이동")
+                # 놓을 때는 Rz를 유지하거나 0으로? 강사님 코드는 접근 방향 Rz 유지함.
+                p_place_high = posx([stack_x, stack_y, SAFE_Z, cur_rx, cur_ry, Rz_target])
+                movel(p_place_high, vel=VELOCITY, acc=ACC)
+                wait(3)
+
+                # 7) [하강] 놓을 위치로 하강
+                print("   🔻 [7] Place 하강")
+                # 조금 위에서(+15mm) 놓기 #place_z + 15.0
+                p_place = posx([stack_x, stack_y, place_z, cur_rx, cur_ry, Rz_target])
+                movel(p_place, vel=VELOCITY/2, acc=ACC/2)
+                wait(3)
+
+                # 8) 놓기
+                print("   🖐 [8] 놓기")
+                if self.gripper: self.gripper.move(val_open)
+                wait(4)
+
+                # 9) 복귀
+                print("   🔼 [9] 복귀")
+                movel(p_place_high, vel=VELOCITY, acc=ACC)
+                wait(5)
+
+            print("\n✨ 모든 작업 완료! 홈으로 이동.")
             movej(home_pose, vel=VELOCITY, acc=ACC)
+            wait(3)
 
         except Exception as e:
-            self.get_logger().error(f"실행 중 오류: {e}")
+            self.get_logger().error(f"작업 중 오류 발생: {e}")
         finally:
             self.selected_queue = []
             self.stack_base_coords = None
             self.is_working = False
-
-    # ============================================================
-    # [필살기 2] 동작 스킵 방지 (movej 사용)
-    # ============================================================
-    def move_smart_pick_and_place(self, px, py, pz, width, sx, sy, sz):
-        from DSR_ROBOT2 import get_current_posx, movel, movej, wait
-        from DR_common2 import posx, posj
-
-        target_open = 0
-        target_close = 500
-        if width <= 35:
-            target_open = 300; target_close = 850
-        elif width <= 45:
-            target_open = 200; target_close = 600
-        else:
-            target_open = 0; target_close = 350
-
-        # 현재 관절 각도 가져오기 (이동 시 참조용)
-        # cur_j = get_current_posj() # (필요시 사용)
-        
-        # 현재 좌표의 회전값(Rx, Ry, Rz) 유지
-        cur_x = get_current_posx()[0]
-        rx, ry, rz = cur_x[3], cur_x[4], cur_x[5]
-        
-        safe_z = 350.0
-
-        # ----------------------------------------------------
-        # [PICK] 잡으러 가기
-        # ----------------------------------------------------
-        print("   🚀 [1] Pick 위치 상공으로 이동 중...")
-        # movel이 씹히는 경우를 대비해 movej(관절이동)로 근처까지 보내버릴 수도 있으나
-        # 일단 movel을 쓰되, 실패 시 로그가 남도록 함.
-        
-        # 1. Pick 상공
-        movel(posx([px, py, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-        wait(0.2)
-        
-        # 2. 그리퍼 벌리기
-        if self.gripper: self.gripper.move(target_open)
-        
-        # 3. 내려가기 (천천히)
-        print("   🔻 [2] 하강하여 잡기...")
-        movel(posx([px, py, pz, rx, ry, rz]), vel=VELOCITY/2, acc=ACC/2)
-        wait(0.5) # 확실히 멈출 때까지 대기
-        
-        # 4. 잡기
-        if self.gripper: self.gripper.move(target_close)
-        print("   ✊ [3] 그립!")
-        wait(1.5) # 잡는 시간 충분히
-
-        # 5. 올라오기
-        movel(posx([px, py, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-
-        # ----------------------------------------------------
-        # [PLACE] 쌓으러 가기
-        # ----------------------------------------------------
-        print("   🚀 [4] Place 위치로 이동...")
-        movel(posx([sx, sy, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-        
-        print("   🔻 [5] 하강하여 놓기...")
-        movel(posx([sx, sy, sz + 15.0, rx, ry, rz]), vel=VELOCITY/2, acc=ACC/2)
-        wait(0.5)
-
-        if self.gripper: self.gripper.move(0) 
-        print("   🖐 [6] 놓기 완료")
-        wait(0.8)
-
-        movel(posx([sx, sy, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-
+            self.target_stack_count = 0 
+            print("🎉 완료! 다시 시작하려면 터미널을 확인하세요.")
 
     def process_and_render(self):
-        self.vision.config.threshold = cv2.getTrackbarPos("Threshold", "Control")
-        self.vision.config.min_area = cv2.getTrackbarPos("Min Area", "Control")
-        self.vision.config.max_area = cv2.getTrackbarPos("Max Area", "Control")
-
         if not self.vision.update(): return
 
         self.blocks = self.vision.last_blocks
         display = self.vision.last_frame.copy()
-        c = self.vision.config
-        cv2.rectangle(display, (c.roi_x, c.roi_y), (c.roi_x+c.roi_w, c.roi_y+c.roi_h), (0,0,255), 2)
-
+        
         for block in self.blocks:
             is_sel = (block in self.selected_queue)
             col = (0, 255, 255) if is_sel else (0, 255, 0)
             cv2.drawContours(display, [block.rotated_box], 0, col, 2)
-            cx, cy = block.center_2d
             
-            w_mm = min(block.real_width_mm, block.real_height_mm)
-            cv2.putText(display, f"{w_mm:.0f}mm", (cx-20, cy+25), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,255,255), 1)
-
             if hasattr(block, 'selection_order'):
+                cx, cy = block.center_2d
                 cv2.putText(display, f"#{block.selection_order}", (cx, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0,0,255), 2)
 
-        if self.target_stack_count == 0: msg = "Input number in terminal"
-        elif len(self.selected_queue) < self.target_stack_count: msg = "Select Blocks..."
-        elif self.stack_base_coords is None: msg = ">> Click Target Floor <<"
-        else: msg = "Auto Stacking..."
+        if self.target_stack_count == 0: msg = "Input Number in Terminal"
+        elif self.is_working: msg = "Robot Working..."
+        elif len(self.selected_queue) < self.target_stack_count: msg = f"Select Blocks ({len(self.selected_queue)}/{self.target_stack_count})"
+        elif self.stack_base_coords is None: msg = "Click Target Floor"
+        else: msg = "Ready"
+        
         cv2.putText(display, msg, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255,0,0), 2)
         cv2.imshow("Result", display)
-        
-        if self.vision.last_depth is not None:
-            d_view = cv2.applyColorMap(cv2.convertScaleAbs(self.vision.last_depth, alpha=0.03), cv2.COLORMAP_JET)
-            cv2.imshow("Depth", d_view)
-
+        cv2.waitKey(1)
 
 def main(args=None):
     rclpy.init(args=args)
@@ -308,46 +304,33 @@ def main(args=None):
 
     robot = RobotControllerNode()
 
-    executor = MultiThreadedExecutor()
-    executor.add_node(robot)
-    executor.add_node(dsr_node)
-    spin_thread = threading.Thread(target=executor.spin, daemon=True)
-    spin_thread.start()
-
     cv2.namedWindow("Result", cv2.WINDOW_NORMAL)
     cv2.resizeWindow("Result", 640, 480)
     cv2.setMouseCallback("Result", robot.mouse_callback)
-    
-    cv2.namedWindow("Control")
-    cfg = robot.vision.config
-    cv2.createTrackbar("Threshold", "Control", cfg.threshold, 255, lambda x: None)
-    cv2.createTrackbar("Min Area", "Control", cfg.min_area, 5000, lambda x: None)
-    cv2.createTrackbar("Max Area", "Control", cfg.max_area, 30000, lambda x: None)
 
     print("\n" + "="*40)
-    print("🏗️ Smart Tower Builder (NUCLEAR OPTION)")
+    print("🏗️ Smart Tower Builder (INSTRUCTOR PERFECT SYNC)")
     print("="*40)
+
+    executor = MultiThreadedExecutor()
+    executor.add_node(robot)
+    executor.add_node(dsr_node)
+    
+    spin_thread = threading.Thread(target=executor.spin, daemon=True)
+    spin_thread.start()
 
     try:
         while rclpy.ok():
-            if robot.target_stack_count == 0:
+            if robot.target_stack_count == 0 and not robot.is_working:
                 try:
                     val = input("\n👉 몇 층 탑을 쌓으시겠습니까? (숫자) >> ")
                     cnt = int(val)
                     if cnt > 0:
                         robot.target_stack_count = cnt
-                        print(f"✅ {cnt}개 블럭을 선택하세요.")
+                        print(f"✅ {cnt}개 블럭을 화면에서 선택하세요.")
                 except ValueError: pass
-                continue
             
             robot.process_and_render()
-            
-            if not robot.is_working and robot.target_stack_count > 0 and robot.stack_base_coords is not None:
-                if len(robot.selected_queue) == 0:
-                    robot.target_stack_count = 0
-                    robot.stack_base_coords = None
-                    print("\n🎉 완료! 다시 시작합니다.")
-
             if cv2.waitKey(1) & 0xFF == 27: break
 
     except KeyboardInterrupt:
