@@ -4,7 +4,6 @@ import pyrealsense2 as rs
 from dataclasses import dataclass, field, asdict
 from typing import Optional, List, Tuple, Literal
 from contextlib import contextmanager
-import json
 from datetime import datetime
 
 # ===== Global System Handle =====
