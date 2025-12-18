@@ -1,7 +1,7 @@
 import rclpy
 import DR_init
 import sys
-from vtestDataS import vtestData
+from tower_builder.vtestDataS import vtestData
 
 
 def main(args=None):
@@ -12,15 +12,15 @@ def main(args=None):
     DR_init.__dsr__id = ROBOT_ID
     DR_init.__dsr__model = ROBOT_MODEL
 
-    VEL = 50
-    ACC = 50
+    VEL = 60    
+    ACC = 60
 
     node = rclpy.create_node('example_py', namespace=ROBOT_ID)
 
     DR_init.__dsr__node = node
 
     from DSR_ROBOT2 import(
-        movej, movel, posj, 
+        movej, movel,
         set_robot_mode, ROBOT_MODE_AUTONOMOUS
     ) 
 
@@ -29,35 +29,21 @@ def main(args=None):
     block, floor = vtestData()
 
     rx, ry, rz = 90, 180, 90
-    #=================================
+
+    # 대기 위치로 이동
+    movej([0, 0, 90, 0, 90, 0], VEL, ACC)
     # 쌓기
-    #=================================
     for i in range(len(block)):
         camx, camy, camz = block[i]["center_3d"]
+
+        final_x = 690 + camy
         
-
-
-    P0 = posj(0,0,90,0,90,0)
-    print("홈 위치로 이동합니다")
-    movej(P0, VEL, ACC)
-
-    print("1. movej 예제를 실행합니다.")
-    movej([0, 0, 90, -90, 90, 0], VEL, ACC)
-    # movej([90, 0, 90, 0, 90, 0], VEL, ACC)
-    # movej([0, 0, 60, 120, 90, 0], VEL, ACC)
+        final_y = camx
     
-    print("홈 위치로 이동합니다")
-    movej(P0, VEL, ACC)
+        final_z = 823 - camz
 
-    print("2. movel 예제를 실행합니다.")
-    movel([373, 100, 404, 12, -180, 12], VEL, ACC)
-    movel([473, 100, 404, 12, -180, 12], VEL, ACC)
-    movel([373, 100, 504, 12, -180, 12], VEL, ACC)
+        movel([final_x, final_y, final_z, rx, ry, rz], VEL, ACC)
 
-    print("홈 위치로 이동합니다")
-    movej(P0, VEL, ACC)
-
-    print("예제 프로그램이 종료되었습니다.")
     rclpy.shutdown()
 
 if __name__ == '__main__':

@@ -5,7 +5,3 @@ __pycache__
 *.pyc
 main_mod.py
 main_mod2.py
-build/
-install/
-log/
-./src/tower_builder/tower_builder/__pycache__/
