@@ -66,20 +66,7 @@ class RobotControllerNode(Node):
     def terminate_gripper(self):
         if self.gripper: self.gripper.terminate()
 
-    # ============================================================
-    # [필살기 1] 터미널 명령어로 그리퍼 전원 강제 주입
-    # ============================================================
-    def force_gripper_power_on(self):
-        print("\n⚡ [강제 명령] 그리퍼 전원 24V 공급 시도 중...")
-        # 파이썬 라이브러리가 말을 안 들으니, 쉘 명령어로 직접 때립니다.
-        cmd = f"ros2 service call /{ROBOT_ID}/tool/set_tool_voltage dsr_msgs/srv/SetToolVoltage \"{{voltage: 24}}\""
-        result = os.system(cmd)
-        
-        if result == 0:
-            print("✅ 전원 공급 명령 전송 완료!")
-        else:
-            print("⚠️ 전원 공급 명령 실패 (하지만 이미 켜져있을 수도 있음)")
-        time.sleep(1.0)
+
 
     # ============================================================
     # 마우스 콜백
@@ -139,19 +126,7 @@ class RobotControllerNode(Node):
         from DR_common2 import posj, posx
 
         try:
-            # 1. 전원 강제 공급
-            self.force_gripper_power_on()
-
-            # 2. 그리퍼 워밍업 (확인사살)
-            if self.gripper:
-                print("✊ 그리퍼 테스트 동작...")
-                self.gripper.move(0)
-                wait(0.5)
-                self.gripper.move(800)
-                wait(0.5)
-                self.gripper.move(0)
-                wait(0.5)
-
+            
             # 3. 홈 정렬
             print("🏠 홈 위치 정렬...")
             home_pose = posj(0, 0, 90, 0, 90, 0)
@@ -191,26 +166,25 @@ class RobotControllerNode(Node):
             self.stack_base_coords = None
             self.is_working = False
 
-    # ============================================================
-    # [필살기 2] 동작 스킵 방지 (movej 사용)
+   # ============================================================
+    # [수정 완료] 타이밍 대폭 늘림 + 그리퍼 악력 강화
     # ============================================================
     def move_smart_pick_and_place(self, px, py, pz, width, sx, sy, sz):
         from DSR_ROBOT2 import get_current_posx, movel, movej, wait
         from DR_common2 import posx, posj
 
-        target_open = 0
-        target_close = 500
+        # [수정 1] 그리퍼 값 튜닝 (꽉 잡게 값 올림)
         if width <= 35:
-            target_open = 300; target_close = 850
+            # 작은 블럭
+            target_open = 300; target_close = 600
         elif width <= 45:
-            target_open = 200; target_close = 600
+            # 중간 블럭 (아까 600이 헐거웠으므로 750으로 상향)
+            target_open = 200; target_close = 550
         else:
-            target_open = 0; target_close = 350
+            # 큰 블럭
+            target_open = 0; target_close = 450
 
-        # 현재 관절 각도 가져오기 (이동 시 참조용)
-        # cur_j = get_current_posj() # (필요시 사용)
-        
-        # 현재 좌표의 회전값(Rx, Ry, Rz) 유지
+        # 현재 자세 회전값(Rx, Ry, Rz) 유지
         cur_x = get_current_posx()[0]
         rx, ry, rz = cur_x[3], cur_x[4], cur_x[5]
         
@@ -219,46 +193,52 @@ class RobotControllerNode(Node):
         # ----------------------------------------------------
         # [PICK] 잡으러 가기
         # ----------------------------------------------------
-        print("   🚀 [1] Pick 위치 상공으로 이동 중...")
-        # movel이 씹히는 경우를 대비해 movej(관절이동)로 근처까지 보내버릴 수도 있으나
-        # 일단 movel을 쓰되, 실패 시 로그가 남도록 함.
-        
-        # 1. Pick 상공
-        movel(posx([px, py, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-        wait(0.2)
+        print("   🚀 [1] Pick 위치 상공으로 이동 중... (3초 대기)")
+        p_pick_ready = posx([px, py, safe_z, rx, ry, rz])
+        movel(p_pick_ready, vel=VELOCITY, acc=ACC)
+        wait(3.0) # [중요] 로봇이 도착할 때까지 충분히 기다림
         
         # 2. 그리퍼 벌리기
         if self.gripper: self.gripper.move(target_open)
+        wait(1.0) # 벌리는 시간 확보
         
-        # 3. 내려가기 (천천히)
-        print("   🔻 [2] 하강하여 잡기...")
-        movel(posx([px, py, pz, rx, ry, rz]), vel=VELOCITY/2, acc=ACC/2)
-        wait(0.5) # 확실히 멈출 때까지 대기
+        # 3. 내려가기
+        print("   🔻 [2] 하강하여 잡기... (2초 대기)")
+        p_pick_down = posx([px, py, pz, rx, ry, rz])
+        movel(p_pick_down, vel=VELOCITY/2, acc=ACC/2)
+        wait(2.0) # 내려가는 시간 확보
         
         # 4. 잡기
         if self.gripper: self.gripper.move(target_close)
-        print("   ✊ [3] 그립!")
-        wait(1.5) # 잡는 시간 충분히
+        print("   ✊ [3] 그립! (2초간 꽉 잡기)")
+        wait(2.0) # [중요] 잡는 시간 충분히 줌 (아까 여기서 놓침)
 
         # 5. 올라오기
-        movel(posx([px, py, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
+        print("   🔼 [4] 들어 올리기... (2초 대기)")
+        movel(p_pick_ready, vel=VELOCITY, acc=ACC)
+        wait(2.0)
 
         # ----------------------------------------------------
         # [PLACE] 쌓으러 가기
         # ----------------------------------------------------
-        print("   🚀 [4] Place 위치로 이동...")
-        movel(posx([sx, sy, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
+        print("   🚀 [5] Place 위치로 이동... (4초 대기)")
+        p_place_ready = posx([sx, sy, safe_z, rx, ry, rz])
+        movel(p_place_ready, vel=VELOCITY, acc=ACC)
+        wait(4.0) # [중요] 이동 거리가 머니까 더 기다림
         
-        print("   🔻 [5] 하강하여 놓기...")
-        movel(posx([sx, sy, sz + 15.0, rx, ry, rz]), vel=VELOCITY/2, acc=ACC/2)
-        wait(0.5)
+        print("   🔻 [6] 하강하여 놓기... (2초 대기)")
+        p_place_down = posx([sx, sy, sz + 15.0, rx, ry, rz])
+        movel(p_place_down, vel=VELOCITY/2, acc=ACC/2)
+        wait(2.0)
 
         if self.gripper: self.gripper.move(0) 
-        print("   🖐 [6] 놓기 완료")
-        wait(0.8)
+        print("   🖐 [7] 놓기 완료 (1초 대기)")
+        wait(1.0) # 놓는 시간 확보
 
-        movel(posx([sx, sy, safe_z, rx, ry, rz]), vel=VELOCITY, acc=ACC)
-
+        # 복귀
+        print("   🔼 [8] 복귀 중...")
+        movel(p_place_ready, vel=VELOCITY, acc=ACC)
+        wait(2.0)
 
     def process_and_render(self):
         self.vision.config.threshold = cv2.getTrackbarPos("Threshold", "Control")
