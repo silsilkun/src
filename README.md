@@ -11,4 +11,4 @@
 
       * ros2 launch dsr_bringup2 dsr_bringup2_rviz.launch.py mode:=real host:=110.120.1.18 port:=12345 model:=e0509
       
-      * * ros2 run tower_builder stb
+      * ros2 run tower_builder stb
