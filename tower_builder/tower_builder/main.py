@@ -184,24 +184,24 @@ class RobotControllerNode(Node):
                 # +1.0mm는 아주 미세한 안전 여유 (종이 한 장 두께) -> 짓누름 방지용
                 place_z = stack_base_z + current_stack_height + 1.0
 
-                # # --- 접근 방향 및 Rz 계산 ---
-                # cur_pos = get_current_posx()[0]
-                # cur_x, cur_y = cur_pos[0], cur_pos[1]
-                # cur_rx, cur_ry = cur_pos[3], cur_pos[4]
+                # --- 접근 방향 및 Rz 계산 ---
+                cur_pos = get_current_posx()[0]
+                cur_x, cur_y = cur_pos[0], cur_pos[1]
+                cur_rx, cur_ry = cur_pos[3], cur_pos[4]
 
-                # dx, dy = pick_x - cur_x, pick_y - cur_y
-                # if abs(dx) > abs(dy):
-                #     approach_axis = "x+" if dx > 0 else "x-"
-                # else:
-                #     approach_axis = "y+" if dy > 0 else "y-"
+                dx, dy = pick_x - cur_x, pick_y - cur_y
+                if abs(dx) > abs(dy):
+                    approach_axis = "x+" if dx > 0 else "x-"
+                else:
+                    approach_axis = "y+" if dy > 0 else "y-"
 
-                # # Rz 설정
-                # if approach_axis == "x+":   Rz_target = 180.0
-                # elif approach_axis == "x-": Rz_target = 0.0
-                # elif approach_axis == "y+": Rz_target = -90.0
-                # elif approach_axis == "y-": Rz_target = 90.0
+                # Rz 설정
+                if approach_axis == "x+":   Rz_target = 180.0
+                elif approach_axis == "x-": Rz_target = 0.0
+                elif approach_axis == "y+": Rz_target = -90.0
+                elif approach_axis == "y-": Rz_target = 90.0
                 
-                # print(f"   🧭 접근 방향: {approach_axis} -> Rz: {Rz_target}")
+                print(f"   🧭 접근 방향: {approach_axis} -> Rz: {Rz_target}")
 
                 SAFE_Z = 350.0 
                 val_open = 0 
