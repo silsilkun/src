@@ -1,3 +1,4 @@
+#camera.py
 """
 🏗️ Block Detection System - RealSense (v6)
 ============================================

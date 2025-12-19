@@ -44,9 +44,9 @@ class BlockDetectionSystem(Node):
         # =========================
         # 토픽명
         # =========================
-        self.color_topic = '/camera/camera/color/image_raw'
-        self.depth_topic = '/camera/camera/aligned_depth_to_color/image_raw'
-        self.info_topic  = '/camera/camera/color/camera_info'
+        self.color_topic = '/camera/color/image_raw'
+        self.depth_topic = '/camera/aligned_depth_to_color/image_raw'
+        self.info_topic  = '/camera/color/camera_info'
 
         # =========================
         # 검출 파라미터
@@ -147,29 +147,33 @@ class BlockDetectionSystem(Node):
     # synced callback (color + depth)
     # -------------------------
     def _cb_synced(self, color_msg: Image, depth_msg: Image):
-        color_bgr = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
-        depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+        # 디버깅: 이미지가 들어오고 있는지 확인
+        # self.get_logger().info("📸 이미지 쌍 수신됨 (Sync 성공)", throttle_duration_sec=2)
+        
+        try:
+            color_bgr = self.bridge.imgmsg_to_cv2(color_msg, desired_encoding='bgr8')
+            depth = self.bridge.imgmsg_to_cv2(depth_msg, desired_encoding='passthrough')
+        except Exception as e:
+            self.get_logger().error(f"이미지 변환 실패: {e}")
+            return
 
         if depth_msg.encoding == '16UC1':
             depth_m = depth.astype(np.float32) / 1000.0
-        elif depth_msg.encoding == '32FC1':
-            depth_m = depth.astype(np.float32)
         else:
             depth_m = depth.astype(np.float32)
 
         self._last_color_bgr = color_bgr
         self._last_depth_m = depth_m
 
-        # intrinsics가 아직 없으면, 화면만 띄우고 검출은 잠시 대기
+        # [수정됨] Intrinsics 없어도 일단 이미지는 저장해둠 (화면에 띄우기 위해)
         if self.fx is None:
             now = time.time()
-            if now - self._last_warn_t > 1.0:
-                self.get_logger().warn("camera_info(intrinsics) 수신 전입니다. 잠시 대기 중...")
+            if now - self._last_warn_t > 2.0:
+                self.get_logger().warn(f"⚠️ 이미지는 들어오는데 Camera Info가 없습니다. 토픽명: {self.info_topic} 확인필요")
                 self._last_warn_t = now
-            self._last_blocks = []
-            self._last_bin_img = None
             return
 
+        # 검출 로직 수행
         blocks, bin_img = self._detect_blocks_from_frames(color_bgr, depth_m)
         self._last_blocks = blocks
         self._last_bin_img = bin_img

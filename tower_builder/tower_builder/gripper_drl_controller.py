@@ -120,11 +120,11 @@ class GripperController:
         return success
 
     def terminate(self) -> bool:
-        self.node.get_logger().info("Terminating gripper connection...")
-        terminate_script = "flange_serial_close()"
-        success = self._send_drl_script(terminate_script)
-        if success:
-            self.node.get_logger().info("Gripper connection terminated successfully.")
-        else:
-            self.node.get_logger().error("Failed to terminate gripper connection.")
-        return success
+            self.node.get_logger().info("Terminating gripper connection...")
+            terminate_script = "flange_serial_close()"
+            success = self._send_drl_script(terminate_script)
+            if success:
+                self.node.get_logger().info("Gripper connection terminated successfully.")
+            else:
+                self.node.get_logger().error("Failed to terminate gripper connection.")
+            return success
