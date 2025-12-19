@@ -3,7 +3,6 @@ import DR_init
 import sys
 from tower_builder.vtestDataS import vtestData
 
-
 def main(args=None):
     rclpy.init(args=args)
 
@@ -27,6 +26,7 @@ def main(args=None):
     set_robot_mode(ROBOT_MODE_AUTONOMOUS)
 
     block, floor = vtestData()
+    
 
     rx, ry, rz = 90, 180, 90
 

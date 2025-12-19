@@ -59,7 +59,7 @@ def vtestData():
     return blocks, floors
 
     # 5️⃣ 시스템 종료
-    v9.stop_system()
+    # v9.stop_system()
 
 if __name__ == "__main__":
     vtestData()
