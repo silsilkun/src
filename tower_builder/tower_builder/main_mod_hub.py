@@ -1,8 +1,12 @@
 """
-🏗️ Smart Tower Builder - PERFECT INSTRUCTOR SYNC
-================================================
+🏗️ Smart Tower Builder - PRECISE STACKING
+=========================================
 [수정 완료]
-- execute_stacking_sequence 함수 내 'wait' 임포트 추가
+1. 떨어뜨리기(Air Drop) 삭제 -> 바닥에 딱 맞춰서 안착
+2. '짓눌림 방지' 완벽 해결:
+   - 이전 블럭들의 높이를 누적 계산하여 정확한 Place Z 좌표 산출
+   - 카메라 오차 보정 (36.1mm -> 30mm / 47.8mm -> 50mm 등으로 표준화)
+3. 스레드, 좌표변환 등 기존 성공 로직 유지
 """
 
 import cv2
@@ -63,7 +67,7 @@ class RobotControllerNode(Node):
         if self.gripper: self.gripper.terminate()
 
     # ============================================================
-    # [핵심] 좌표 변환 (강사님 공식 + 지나님 Z값 825)
+    # [핵심] 좌표 변환 (성공했던 값 유지)
     # ============================================================
     def convert_camera_to_robot(self, cam_x_mm, cam_y_mm, cam_z_mm):
         # 1. X축: 635 + Y - 20 (강사님 공식)
@@ -126,23 +130,19 @@ class RobotControllerNode(Node):
             worker.start()
 
     # ============================================================
-    # 실행 시퀀스 (강사님 로직 100% 이식 + 직각 이동 보장)
+    # 실행 시퀀스 (높이 누적 계산 적용)
     # ============================================================
     def execute_stacking_sequence(self):
         self.is_working = True
         print("\n🚀 로봇 작업 시퀀스 시작")
         
         stack_x, stack_y, stack_base_z = self.stack_base_coords
-        BLOCK_H = 40.0
+        
+        # [NEW] 현재까지 쌓인 높이를 저장하는 변수 (0부터 시작)
+        current_stack_height = 0.0
 
-        # [수정] wait 추가 완료
         from DSR_ROBOT2 import movel, movej, get_current_posx, wait
         from DR_common2 import posx, posj
-
-        # # 타이밍 상수
-        # T_MOVE = 3.5
-        # T_SHORT = 1.5
-        # T_GRIP = 1.0
 
         try:
             # 1. 홈 정렬
@@ -153,28 +153,49 @@ class RobotControllerNode(Node):
 
             # 2. 적재 루프
             for i, block in enumerate(self.selected_queue):
-                print(f"\n🏗️ [{i+1}층 작업 시작] ===================")
+                # --------------------------------------------------------
+                # [높이 계산 로직]
+                # 카메라 측정값(w)을 실제 규격(30, 40, 50)으로 변환
+                # (오차 때문에 47.8mm 이렇게 나오면 50mm로 인식하게 함)
+                # --------------------------------------------------------
+                measured_w = min(block.real_width_mm, block.real_height_mm)
+                
+                if measured_w >= 45.0:
+                    real_block_height = 50.0 # 대형
+                    val_close = 580
+                    size_name = "대형(5cm)"
+                elif measured_w >= 35.0:
+                    real_block_height = 40.0 # 중형
+                    val_close = 650
+                    size_name = "중형(4cm)"
+                else:
+                    real_block_height = 30.0 # 소형
+                    val_close = 680
+                    size_name = "소형(3cm)"
+
+                print(f"\n🏗️ [{i+1}층 작업 시작] 블럭: {size_name} (실측: {measured_w:.1f}mm) =======")
 
                 # --- 좌표 계산 ---
                 cam_x, cam_y, cam_z = block.center_3d_mm
                 pick_x, pick_y, pick_z = self.convert_camera_to_robot(cam_x, cam_y, cam_z)
                 
-                place_z = stack_base_z + (i * BLOCK_H)
+                # [중요] 놓을 높이 = 바닥 높이 + 지금까지 쌓인 높이
+                # (이렇게 해야 2층, 3층이 정확히 그 위에 안착함)
+                # +1.0mm는 아주 미세한 안전 여유 (종이 한 장 두께) -> 짓누름 방지용
+                place_z = stack_base_z + current_stack_height + 1.0
 
-                # --- [강사님 핵심 로직] 접근 방향 및 Rz 계산 ---
-                # 현재 위치 가져오기
+                # --- 접근 방향 및 Rz 계산 ---
                 cur_pos = get_current_posx()[0]
                 cur_x, cur_y = cur_pos[0], cur_pos[1]
-                cur_rx, cur_ry = cur_pos[3], cur_pos[4] # Rx, Ry는 유지
+                cur_rx, cur_ry = cur_pos[3], cur_pos[4]
 
-                # 어느 쪽에서 접근하는지 계산 (강사님 코드 그대로)
                 dx, dy = pick_x - cur_x, pick_y - cur_y
                 if abs(dx) > abs(dy):
                     approach_axis = "x+" if dx > 0 else "x-"
                 else:
                     approach_axis = "y+" if dy > 0 else "y-"
 
-                # 방향별 손목 회전(Rz) 설정 (이게 없으면 손목 꺾임!)
+                # Rz 설정
                 if approach_axis == "x+":   Rz_target = 180.0
                 elif approach_axis == "x-": Rz_target = 0.0
                 elif approach_axis == "y+": Rz_target = -90.0
@@ -182,77 +203,59 @@ class RobotControllerNode(Node):
                 
                 print(f"   🧭 접근 방향: {approach_axis} -> Rz: {Rz_target}")
 
-                # 안전 높이 (이동 중 부딪히지 않게)
                 SAFE_Z = 350.0 
-
-                # 블럭 크기별 그리퍼 값 (지나님 설정)
-                w = min(block.real_width_mm, block.real_height_mm)
                 val_open = 0 
-                if w >= 45: val_close = 650
-                elif w >= 35: val_close = 550
-                else: val_close = 400
 
                 # ================= [PICK 동작] =================
-                
-                # 1) [XY 이동] 안전 높이에서 좌표만 먼저 맞춤 (직각 이동의 핵심!)
                 print("   🚀 [1] 상공 이동 (XY축 정렬)")
-                # Z는 Safe_Z, Rz는 계산된 값 적용
                 p_high = posx([pick_x, pick_y, SAFE_Z, cur_rx, cur_ry, Rz_target])
                 movel(p_high, vel=VELOCITY, acc=ACC)
-                # time.sleep(T_MOVE)
-                wait(5)
+                wait(3.5)
 
-                # 그리퍼 열기
                 if self.gripper: self.gripper.move(val_open)
                 wait(2)
 
-                # 2) [상공 접근] 목표지점 5cm 위로 접근 (강사님 target_up)
                 print("   🔻 [2] 목표 상공 진입 (z+50)")
                 p_ready = posx([pick_x, pick_y, pick_z + 50, cur_rx, cur_ry, Rz_target])
                 movel(p_ready, vel=VELOCITY, acc=ACC)
-                wait(5)
+                wait(2)
 
-                # 3) [하강] 진짜 잡으러 내려감 (강사님 target_at)
                 print(f"   🔻 [3] Pick 하강 (Z={pick_z:.1f})")
                 p_pick = posx([pick_x, pick_y, pick_z, cur_rx, cur_ry, Rz_target])
                 movel(p_pick, vel=VELOCITY/2, acc=ACC/2)
                 wait(3)
 
-                # 4) 잡기
                 print(f"   ✊ [4] 그립 ({val_close})")
                 if self.gripper: self.gripper.move(val_close)
                 wait(3)
 
-                # 5) 들어올리기
                 print("   🔼 [5] 상승")
                 movel(p_high, vel=VELOCITY, acc=ACC)
                 wait(3)
 
-               # ================= [PLACE 동작] =================
-                
-                # 6) [XY 이동] 타워 위치 상공으로 이동
-                print("   🚀 [6] Place 상공 이동")
-                # 놓을 때는 Rz를 유지하거나 0으로? 강사님 코드는 접근 방향 Rz 유지함.
+                # ================= [PLACE 동작] =================
+                print(f"   🚀 [6] Place 상공 이동 (목표 높이: {place_z:.1f})")
                 p_place_high = posx([stack_x, stack_y, SAFE_Z, cur_rx, cur_ry, Rz_target])
                 movel(p_place_high, vel=VELOCITY, acc=ACC)
-                wait(5)
+                wait(3)
 
-                # 7) [하강] 놓을 위치로 하강
-                print("   🔻 [7] Place 하강 (눌림 방지 +5mm)") # <-- 로그 메시지 수정
-                # [수정 핵심] place_z 뒤에 + 5.0 을 추가해서 살짝 위에서 멈추게 함
-                p_place = posx([stack_x, stack_y, place_z + 5.0, cur_rx, cur_ry, Rz_target])
+                print(f"   🔻 [7] Place 하강")
+                # 정확히 계산된 place_z로 이동 (툭 떨어뜨리기 아님, 살포시 안착)
+                p_place = posx([stack_x, stack_y, place_z, cur_rx, cur_ry, Rz_target])
                 movel(p_place, vel=VELOCITY/2, acc=ACC/2)
                 wait(3)
 
-                # 8) 놓기
                 print("   🖐 [8] 놓기")
                 if self.gripper: self.gripper.move(val_open)
                 wait(4)
 
-                # 9) 복귀
                 print("   🔼 [9] 복귀")
                 movel(p_place_high, vel=VELOCITY, acc=ACC)
-                wait(3)
+                wait(5)
+                
+                # [중요] 블럭 하나 쌓았으니, 다음 블럭을 위해 높이 누적
+                current_stack_height += real_block_height
+                print(f"   📈 현재 탑 높이: {current_stack_height:.1f}mm (다음 블럭은 이 위에 쌓음)")
 
             print("\n✨ 모든 작업 완료! 홈으로 이동.")
             movej(home_pose, vel=VELOCITY, acc=ACC)
@@ -309,7 +312,7 @@ def main(args=None):
     cv2.setMouseCallback("Result", robot.mouse_callback)
 
     print("\n" + "="*40)
-    print("🏗️ Smart Tower Builder (INSTRUCTOR PERFECT SYNC)")
+    print("🏗️ Smart Tower Builder (PRECISE STACKING)")
     print("="*40)
 
     executor = MultiThreadedExecutor()

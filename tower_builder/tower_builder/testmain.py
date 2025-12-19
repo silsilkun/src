@@ -37,9 +37,7 @@ def main(args=None):
         camx, camy, camz = block[i]["center_3d"]
 
         final_x = 690 + camy
-        
         final_y = camx
-    
         final_z = 823 - camz
 
         movel([final_x, final_y, final_z, rx, ry, rz], VEL, ACC)
