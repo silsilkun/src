@@ -47,6 +47,9 @@ class RobotControllerNode(Node):
         self.stack_base_coords = None 
         self.is_working = False
 
+        # [NEW] 쌓기 기록 (해체용)
+        self.stack_history = []
+
         self.gripper = None
         try:
             self.gripper = GripperController(node=self, namespace=ROBOT_ID)
@@ -121,6 +124,9 @@ class RobotControllerNode(Node):
         current_stack_height = 0.0
         Rz_target = 90.0  # Pick / Place 공통 고정
 
+        # [NEW] 이번 작업 기록 초기화
+        self.stack_history = []
+
         try:
             print("🏠 홈 위치 정렬...")
             home_pose = posj(0, 0, 90, 0, 90, 0)
@@ -145,6 +151,14 @@ class RobotControllerNode(Node):
 
                 SAFE_Z = 350.0
                 val_open = 0
+
+                # [NEW] 해체를 위한 기록 (원래 자리 + 쌓은 자리)
+                self.stack_history.append({
+                    "pick_xyz": (pick_x, pick_y, pick_z),
+                    "place_xyz": (stack_x, stack_y, place_z),
+                    "val_close": val_close,
+                    "Rz": Rz_target,
+                })
 
                 # ================= [PICK 동작] =================
                 p_high = posx([pick_x, pick_y, SAFE_Z, 90, 180, Rz_target])
@@ -203,6 +217,93 @@ class RobotControllerNode(Node):
             self.target_stack_count = 0
             print("🎉 완료! 다시 시작하려면 터미널을 확인하세요.")
 
+    # ============================================================
+    # [NEW] 역순 해체 시퀀스 (기록 기반, camera 안 씀)
+    # ============================================================
+    def execute_unstack_sequence(self):
+        from DSR_ROBOT2 import movel, movej, wait
+        from DR_common2 import posx, posj
+
+        if not self.stack_history:
+            print("⚠️ 해체할 기록이 없습니다. 먼저 탑을 쌓아주세요.")
+            return
+
+        self.is_working = True
+        print("\n🧹 역순 해체 시퀀스 시작")
+
+        SAFE_Z = 350.0
+        val_open = 0
+
+        try:
+            print("🏠 홈 위치 정렬...")
+            home_pose = posj(0, 0, 90, 0, 90, 0)
+            movej(home_pose, vel=VELOCITY, acc=ACC)
+            wait(3)
+
+            # 역순으로 하나씩 해체
+            for rec in reversed(self.stack_history):
+                (pick_x, pick_y, pick_z) = rec["pick_xyz"]
+                (place_x, place_y, place_z) = rec["place_xyz"]
+                val_close = rec["val_close"]
+                Rz_target = rec["Rz"]
+
+                # ================= [UNSTACK PICK: 탑에서 집기] =================
+                p_place_high = posx([place_x, place_y, SAFE_Z, 90, 180, Rz_target])
+                movel(p_place_high, vel=VELOCITY, acc=ACC)
+                wait(2)
+
+                self.gripper.move(val_open)
+                wait(1)
+
+                # 살짝 위 여유 후 접근 (아래 블럭 간섭 방지)
+                p_from_stack = posx([place_x, place_y, place_z + 1.0, 90, 180, Rz_target])
+                movel(p_from_stack, vel=VELOCITY/2, acc=ACC/2)
+                wait(2)
+
+                self.gripper.move(val_close)
+                wait(2)
+
+                movel(p_place_high, vel=VELOCITY, acc=ACC)
+                wait(2)
+
+                # ================= [UNSTACK PLACE: 원래 자리로 복귀] =================
+                p_pick_high = posx([pick_x, pick_y, SAFE_Z, 90, 180, Rz_target])
+                movel(p_pick_high, vel=VELOCITY, acc=ACC)
+                wait(2)
+
+                # 원래 pick_z에 “살포시” 내려놓기 (약간 여유)
+                p_back = posx([pick_x, pick_y, pick_z + 1.0, 90, 180, Rz_target])
+                movel(p_back, vel=VELOCITY/2, acc=ACC/2)
+                wait(2)
+
+                self.gripper.move(val_open)
+                wait(2)
+
+                movel(p_pick_high, vel=VELOCITY, acc=ACC)
+                wait(2)
+
+            print("\n✨ 해체 완료! 홈으로 이동.")
+            movej(home_pose, vel=VELOCITY, acc=ACC)
+            wait(3)
+
+            # 해체까지 완료했으면 기록 비우기
+            self.stack_history = []
+
+        except Exception as e:
+            self.get_logger().error(f"해체 중 오류 발생: {e}")
+            try:
+                print("🚨 오류 발생! 홈 위치로 복구 중...")
+                home_pose = posj(0, 0, 90, 0, 90, 0)
+                movej(home_pose, vel=VELOCITY, acc=ACC)
+                wait(3)
+                print("🏠 홈 위치 복구 완료")
+            except Exception as recovery_error:
+                self.get_logger().error(f"복구 중 오류 발생: {recovery_error}")
+
+        finally:
+            self.is_working = False
+            print("🎉 해체 시퀀스 종료")
+
     def process_and_render(self):
         if not self.vision.update():
             return
@@ -234,6 +335,13 @@ def main(args=None):
 
     try:
         while rclpy.ok():
+            # [NEW] 해체 트리거: idle 상태에서 'u' 입력하면 역순 해체
+            if (not robot.is_working) and robot.stack_history:
+                cmd = input("\n👉 (u) 해체 / (Enter) 계속 >> ").strip().lower()
+                if cmd == "u":
+                    worker = threading.Thread(target=robot.execute_unstack_sequence, daemon=True)
+                    worker.start()
+
             if robot.target_stack_count == 0 and not robot.is_working:
                 try:
                     home_pose = posj(0, 0, 90, 0, 90, 0)
