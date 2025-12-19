@@ -134,6 +134,7 @@ class RobotControllerNode(Node):
             wait(3)
 
             for i, block in enumerate(self.selected_queue):
+                #블럭 각도 맞춰서 각도 돌림(from camera.py)
                 Rz_target = block.angle
                 measured_w = min(block.real_width_mm, block.real_height_mm)
                 if measured_w >= 45.0:
