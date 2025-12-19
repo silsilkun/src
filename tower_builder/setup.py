@@ -24,8 +24,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'stb = tower_builder.main_success:main',
-        'hub = tower_builder.main_mod_hub:main'
+        'stb = tower_builder.main:main',
+        'hub = tower_builder.main_mod_hub:main',
+        'two = tower_builder.main2:main',
         ],
     },
 )

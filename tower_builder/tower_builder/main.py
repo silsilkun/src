@@ -27,7 +27,7 @@ from tower_builder.camera import BlockDetectionSystem
 # ============================================================
 ROBOT_ID = "dsr01"
 ROBOT_MODEL = "e0509"
-VELOCITY, ACC = 150, 150
+VELOCITY, ACC = 200, 200
 
 DR_init.__dsr__id = ROBOT_ID
 DR_init.__dsr__model = ROBOT_MODEL
@@ -122,7 +122,7 @@ class RobotControllerNode(Node):
 
         stack_x, stack_y, stack_base_z = self.stack_base_coords
         current_stack_height = 0.0
-        Rz_target = 90.0  # Pick / Place 공통 고정
+        # Rz_target = 90 # Pick / Place 공통 고정
 
         # [NEW] 이번 작업 기록 초기화
         self.stack_history = []
@@ -134,23 +134,34 @@ class RobotControllerNode(Node):
             wait(3)
 
             for i, block in enumerate(self.selected_queue):
+                Rz_target = block.angle
                 measured_w = min(block.real_width_mm, block.real_height_mm)
                 if measured_w >= 45.0:
                     real_block_height = 50.5
-                    val_close = 580
+                    val_close = 500
+                    val_pregrip = 260  # 대형
+                    val_open = 260
                 elif measured_w >= 30.0:
                     real_block_height = 40.7
-                    val_close = 650
+                    val_close = 550
+                    val_pregrip = 330  # 중형
+                    val_open = 330
                 else:
                     real_block_height = 30.5
-                    val_close = 680
+                    val_close = 600
+                    val_pregrip = 470  # 소형 (요청 예시)
+                    val_open = 470
 
                 cam_x, cam_y, cam_z = block.center_3d_mm
                 pick_x, pick_y, pick_z = self.convert_camera_to_robot(cam_x, cam_y, cam_z)
                 place_z = stack_base_z + current_stack_height + 1.0
 
                 SAFE_Z = 350.0
-                val_open = 0
+                dist_to_tower = ((pick_x - stack_x)**2 + (pick_y - stack_y)**2) ** 0.5
+                if dist_to_tower < 180.0:
+                    SAFE_Z = 420.0
+
+                #val_open = 0
 
                 # [NEW] 해체를 위한 기록 (원래 자리 + 쌓은 자리)
                 self.stack_history.append({
@@ -163,27 +174,29 @@ class RobotControllerNode(Node):
                 # ================= [PICK 동작] =================
                 p_high = posx([pick_x, pick_y, SAFE_Z, 90, 180, Rz_target])
                 movel(p_high, vel=VELOCITY, acc=ACC)
-                wait(3)
+                wait(2)
 
-                self.gripper.move(val_open)
-                wait(1)
+                # [NEW] 상공에서 사이즈 맞춰 "미리 벌림(=거의 잡을 정도)" 세팅 후 하강
+                self.gripper.move(val_pregrip)
+                wait(2)
 
                 p_pick = posx([pick_x, pick_y, pick_z, 90, 180, Rz_target])
                 movel(p_pick, vel=VELOCITY/2, acc=ACC/2)
-                wait(2)
+                wait(3)
 
+                # [NEW] Pick 순간에만 살짝 더 닫아서 고정
                 self.gripper.move(val_close)
-                wait(2)
+                wait(3)
 
                 movel(p_high, vel=VELOCITY, acc=ACC)
                 wait(2)
 
                 # ================= [PLACE 동작] =================
-                p_place_high = posx([stack_x, stack_y, SAFE_Z, 90, 180, Rz_target])
+                p_place_high = posx([stack_x, stack_y, SAFE_Z, 90, 180, 90])
                 movel(p_place_high, vel=VELOCITY, acc=ACC)
                 wait(2)
 
-                p_place = posx([stack_x, stack_y, place_z, 90, 180, Rz_target])
+                p_place = posx([stack_x, stack_y, place_z, 90, 180, 90])
                 movel(p_place, vel=VELOCITY/2, acc=ACC/2)
                 wait(2)
 
@@ -232,7 +245,6 @@ class RobotControllerNode(Node):
         print("\n🧹 역순 해체 시퀀스 시작")
 
         SAFE_Z = 350.0
-        val_open = 0
 
         try:
             print("🏠 홈 위치 정렬...")
@@ -240,53 +252,62 @@ class RobotControllerNode(Node):
             movej(home_pose, vel=VELOCITY, acc=ACC)
             wait(3)
 
-            # 역순으로 하나씩 해체
             for rec in reversed(self.stack_history):
                 (pick_x, pick_y, pick_z) = rec["pick_xyz"]
                 (place_x, place_y, place_z) = rec["place_xyz"]
                 val_close = rec["val_close"]
+                val_open = rec.get("val_open", 0.0)
                 Rz_target = rec["Rz"]
 
                 # ================= [UNSTACK PICK: 탑에서 집기] =================
-                p_place_high = posx([place_x, place_y, SAFE_Z, 90, 180, Rz_target])
+                p_place_high = posx([place_x, place_y, SAFE_Z, 90, 180, 90])
                 movel(p_place_high, vel=VELOCITY, acc=ACC)
                 wait(2)
 
+                # 사이즈 맞춘 벌림 값으로 세팅 후 하강
                 self.gripper.move(val_open)
-                wait(1)
+                wait(4)
 
-                # 살짝 위 여유 후 접근 (아래 블럭 간섭 방지)
-                p_from_stack = posx([place_x, place_y, place_z + 1.0, 90, 180, Rz_target])
+                p_from_stack = posx([place_x, place_y, place_z + 1.0, 90, 180, 90])
                 movel(p_from_stack, vel=VELOCITY/2, acc=ACC/2)
                 wait(2)
 
                 self.gripper.move(val_close)
-                wait(2)
+                wait(3)
 
                 movel(p_place_high, vel=VELOCITY, acc=ACC)
                 wait(2)
 
                 # ================= [UNSTACK PLACE: 원래 자리로 복귀] =================
-                p_pick_high = posx([pick_x, pick_y, SAFE_Z, 90, 180, Rz_target])
+                p_pick_high = posx([pick_x, pick_y, SAFE_Z, 90, 180, 90])
                 movel(p_pick_high, vel=VELOCITY, acc=ACC)
                 wait(2)
 
-                # 원래 pick_z에 “살포시” 내려놓기 (약간 여유)
-                p_back = posx([pick_x, pick_y, pick_z + 1.0, 90, 180, Rz_target])
+                # (1) 원래 자리로 내려감
+                p_back = posx([pick_x, pick_y, pick_z + 1.0, 90, 180, 90])
                 movel(p_back, vel=VELOCITY/2, acc=ACC/2)
                 wait(2)
 
-                self.gripper.move(val_open)
-                wait(2)
+                # (2) 탑 간섭 방지용 '좁은 오픈'으로 먼저 풀기
+                self.gripper.move(370)
+                wait(3)
 
+                # (3) 상공으로 빠진 다음에만 0으로 완전 릴리즈 (간섭 의미 유지)
                 movel(p_pick_high, vel=VELOCITY, acc=ACC)
                 wait(2)
+
+                self.gripper.move(0)   # ✅ 상공에서만 0
+                wait(0.8)
+
+                # # (4) 다시 val_open으로 복귀 (다음 동작에서 너무 벌어진 상태 방지)
+                # self.gripper.move(val_open)
+                # wait(0.5)
+
 
             print("\n✨ 해체 완료! 홈으로 이동.")
             movej(home_pose, vel=VELOCITY, acc=ACC)
             wait(3)
 
-            # 해체까지 완료했으면 기록 비우기
             self.stack_history = []
 
         except Exception as e:
@@ -335,7 +356,7 @@ def main(args=None):
 
     try:
         while rclpy.ok():
-            # [NEW] 해체 트리거: idle 상태에서 'u' 입력하면 역순 해체
+            # 해체 트리거: idle 상태에서 'u' 입력하면 역순 해체
             if (not robot.is_working) and robot.stack_history:
                 cmd = input("\n👉 (u) 해체 / (Enter) 계속 >> ").strip().lower()
                 if cmd == "u":
